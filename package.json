@@ -1,0 +1,34 @@
+{
+  "name": "pi-endpoints",
+  "version": "0.0.0",
+  "description": "让 pi 通过自己的 API 服务（CLIProxyAPI、Magpie、new-api 类中转站等）使用模型：只注册选定的模型，参数和协议取自服务端目录",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "cliproxyapi",
+    "magpie",
+    "relay",
+    "中转"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PosvdM/pi-endpoints.git"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest --run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
