@@ -1,5 +1,6 @@
 import type { Api, ModelCost, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { splitBetas } from "./betas.ts";
 import { type BuiltinModel, findBuiltin, findBuiltinIn, type Vendor, vendorOf } from "./builtin.ts";
 import type { Catalog, CatalogModel } from "./catalog.ts";
 import { DEFAULT_API, type ModelOverride, type ServiceConfig } from "./config.ts";
@@ -18,13 +19,17 @@ export interface Sourced<T, S = Source> {
 export interface ResolvedModel {
 	id: string;
 	ownedBy?: string;
+	/** 服务端标了隐藏，或者看名字是图片生成模型。只影响管理页默认显示不显示。 */
 	hidden: boolean;
 	/** 已启用，但服务端目录里没有这个模型。 */
 	missing: boolean;
 	name: Sourced<string>;
 	api: Sourced<Api, ApiSource>;
 	baseUrl: Sourced<string, "manual" | "default">;
+	/** 交给 pi 的请求头。Anthropic 协议的模型不含 `anthropic-beta`，它的值在 `betas` 里。 */
 	headers?: Record<string, string>;
+	/** 追加到 pi 的 beta 列表里的 Anthropic beta，见 `splitBetas()`。 */
+	betas: string[];
 	contextWindow: Sourced<number>;
 	maxTokens: Sourced<number>;
 	input: Sourced<("text" | "image")[]>;
@@ -221,12 +226,13 @@ export function resolveModel(
 	const compatFrom = compatSource(vendor, model, catalog);
 	// 价格一律按官方 API，GPT 也找 openai，不找订阅版。
 	const costFrom = vendor ? findBuiltinIn(vendor, model.id) : undefined;
-	const headers = { ...service.headers, ...override?.headers };
+	const contextWindow = pick(override?.contextWindow, model.contextWindow, builtin?.contextWindow, DEFAULTS.contextWindow);
+	const { headers, betas } = splitBetas({ ...service.headers, ...override?.headers }, api.value, contextWindow.value, vendor === "anthropic");
 
 	return {
 		id: model.id,
 		ownedBy: model.ownedBy,
-		hidden: model.hidden ?? false,
+		hidden: (model.hidden ?? false) || IMAGE_MODEL.test(model.id),
 		missing,
 		// 去掉后缀才匹配上时不借用名字，否则 claude-opus-5-5 和 claude-opus-5-5-high 会显示成同一个名字。
 		name: pick(override?.name, model.name, builtin && sameModel(builtin.id, model.id) ? builtin.name : undefined, model.id),
@@ -235,7 +241,8 @@ export function resolveModel(
 			? { value: override.baseUrl, source: "manual" }
 			: { value: baseUrlFor(service.baseUrl, api.value), source: "default" },
 		headers: Object.keys(headers).length ? headers : undefined,
-		contextWindow: pick(override?.contextWindow, model.contextWindow, builtin?.contextWindow, DEFAULTS.contextWindow),
+		betas,
+		contextWindow,
 		maxTokens: pick(override?.maxTokens, model.maxTokens, builtin?.maxTokens, DEFAULTS.maxTokens),
 		input: pick(override?.input, model.input, builtin?.input, ["text"]),
 		reasoning: thinking.reasoning,
@@ -249,6 +256,12 @@ export function resolveModel(
 		builtin: builtin ? `${builtin.provider}/${builtin.id}` : undefined,
 	};
 }
+
+/**
+ * 名字里有独立的 image 一词的是图片生成模型，pi 不能拿它对话。CLIProxyAPI 把 gpt-image-* 标成隐藏，
+ * 却把 gemini-3.1-flash-image 这类模型标成显示，所以按名字补上。
+ */
+const IMAGE_MODEL = /(^|[-_/.])image([-_/.]|$)/i;
 
 function sameModel(builtinId: string, id: string): boolean {
 	return builtinId === id || builtinId === id.slice(id.lastIndexOf("/") + 1);

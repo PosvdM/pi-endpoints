@@ -1,4 +1,7 @@
+import type { Model } from "@earendil-works/pi-ai";
+import { streamSimpleAnthropic } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withBetas } from "./betas.ts";
 import { builtinProviderIds } from "./builtin.ts";
 import { type Catalog, CatalogError, fetchCatalog } from "./catalog.ts";
 import {
@@ -51,6 +54,8 @@ export class Endpoints {
 	private cache: CacheFile = {};
 	private errors = new Map<string, string>();
 	private registered = new Set<string>();
+	/** 每个已注册服务里各模型的附加 Anthropic beta，注册和刷新目录时更新。 */
+	private betas = new Map<string, Map<string, string[]>>();
 	private readonly pi: ExtensionAPI;
 
 	constructor(pi: ExtensionAPI) {
@@ -111,6 +116,7 @@ export class Endpoints {
 	}
 
 	private unregister(name: string): void {
+		this.betas.delete(name);
 		if (!this.registered.delete(name)) return;
 		this.pi.unregisterProvider(name);
 	}
@@ -130,16 +136,25 @@ export class Endpoints {
 			name: service.displayName || name,
 			baseUrl: service.baseUrl,
 			apiKey: piApiKey(service, resolved),
-			api: service.defaultApi ?? models[0].api.value,
-			models: models.map(toPiModel),
+			// 所有模型都写明了协议，这里的 api 只用来让 streamSimple 接管 Anthropic 协议的请求。
+			api: "anthropic-messages",
+			// 会话、压缩和摘要请求都经过这里，插件事件 before_provider_request 覆盖不到后两者。
+			streamSimple: (model, context, options) =>
+				streamSimpleAnthropic(model as Model<"anthropic-messages">, context, withBetas(options, this.betas.get(name)?.get(model.id) ?? [])),
+			models: this.piModels(name, models),
 			// 交互模式和 RPC 模式启动后、打开 /model 时，pi 会调用它刷新目录。
 			refreshModels: async (context) => {
 				if (context.allowNetwork) await this.refresh(name, context.signal);
 				const current = this.service(name);
-				return current ? this.enabledModels(current).map(toPiModel) : [];
+				return current ? this.piModels(name, this.enabledModels(current)) : [];
 			},
 		});
 		this.registered.add(name);
+	}
+
+	private piModels(name: string, models: ResolvedModel[]) {
+		this.betas.set(name, new Map(models.map((model) => [model.id, model.betas])));
+		return models.map(toPiModel);
 	}
 
 	private enabledModels(service: ServiceConfig): ResolvedModel[] {

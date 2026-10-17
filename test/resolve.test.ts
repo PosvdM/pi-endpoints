@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type BuiltinModel, candidateIds, findBuiltin, setBuiltinCatalogForTest, vendorOf } from "../src/builtin.ts";
 import type { Catalog } from "../src/catalog.ts";
 import type { ServiceConfig } from "../src/config.ts";
+import { LONG_CONTEXT_BETA } from "../src/betas.ts";
 import { levelsToMap, resolveModel, resolveService, selectApi, supportedLevels, toProviderModel } from "../src/resolve.ts";
 
 const cost = (input: number) => ({ input, output: input * 5, cacheRead: 0, cacheWrite: 0 });
@@ -281,7 +282,35 @@ describe("审查后补充的规则", () => {
 		expect(resolveModel(service(), { id: "claude-opus-5-5", ownedBy: "openai" }, catalog([])).cost.value.input).toBe(4);
 	});
 
+	it("名字里有独立的 image 一词的模型当作隐藏", () => {
+		const models = resolveService(service(), catalog([{ id: "gemini-3.1-flash-image" }, { id: "gpt-image-2" }, { id: "imagen-4" }, { id: "gemini-3.8-flash" }]));
+		expect(models.map((model) => model.hidden)).toEqual([true, true, false, false]);
+	});
+
 	it("没读过目录时，已启用的模型不标为目录里没有", () => {
 		expect(resolveService(service({ enabled: ["a"] }), undefined)[0].missing).toBe(false);
+	});
+});
+
+describe("Anthropic beta", () => {
+	it("上下文超过 200K 的 Anthropic 模型自动申请 1M 上下文", () => {
+		expect(resolveModel(service(), { id: "claude-opus-5-5", ownedBy: "anthropic" }, catalog([])).betas).toEqual([LONG_CONTEXT_BETA]);
+		const small = service({ overrides: { "claude-opus-5-5": { contextWindow: 200000 } } });
+		expect(resolveModel(small, { id: "claude-opus-5-5", ownedBy: "anthropic" }, catalog([])).betas).toEqual([]);
+		const kimi = service({ overrides: { "kimi-k3": { api: "anthropic-messages", contextWindow: 256000 } } });
+		expect(resolveModel(kimi, { id: "kimi-k3", ownedBy: "moonshot" }, catalog([])).betas).toEqual([]);
+	});
+
+	it("请求头里的 anthropic-beta 拆出来合并，其他协议原样保留", () => {
+		const svc = service({
+			headers: { "anthropic-beta": "a, b", "X-Title": "pi" },
+			overrides: { "claude-opus-5-5": { headers: { "Anthropic-Beta": "b,c" } }, "gpt-6.1-sol": { headers: { "anthropic-beta": "a" } } },
+		});
+		const claude = resolveModel(svc, { id: "claude-opus-5-5", ownedBy: "anthropic", contextWindow: 200000 }, catalog([]));
+		expect(claude.headers).toEqual({ "X-Title": "pi" });
+		expect(claude.betas).toEqual(["a", "b", "c"]);
+		const gpt = resolveModel(svc, { id: "gpt-6.1-sol", ownedBy: "openai" }, catalog([]));
+		expect(gpt.headers).toEqual({ "anthropic-beta": "a", "X-Title": "pi" });
+		expect(gpt.betas).toEqual([]);
 	});
 });
