@@ -93,3 +93,7 @@ pi -e .         # 在 pi 里加载当前目录试用
 ```
 
 架构、数据格式和设计约束见 [技术文档](https://github.com/PosvdM/pi-endpoints/blob/main/docs/architecture.md)。
+
+## 许可证
+
+[GNU AGPL-3.0-or-later](https://github.com/PosvdM/pi-endpoints/blob/main/LICENSE)
