@@ -222,3 +222,15 @@ pi -e . --no-session -p --model cpa/gpt-6.1-sol:high "Reply with exactly: OK"
 ```
 
 非交互模式不执行扩展命令，`/endpoints` 需要在交互界面或 RPC 模式（`pi --mode rpc`）里测试。管理页的接口可以绕开命令，直接用 `startWebUI()` 启动后请求。
+
+## 发布流程
+
+npm 包由 GitHub Actions 通过 npm 的 Trusted Publishing（OIDC）发布，不使用 npm 令牌：
+
+1. 用 `npm version <版本> --no-git-tag-version` 改 `package.json` 和 `package-lock.json` 里的版本号，提交并推送到 main。
+2. 在这个提交上创建 GitHub Release，标签写成 `v<版本>`，如 `v0.2.1`。
+3. Release 发布后触发 `.github/workflows/publish.yml`：运行类型检查和单元测试，确认标签和 `package.json` 的版本一致，然后 `npm publish`。npm 根据 `package.json` 里的版本号发布，不看标签，所以两者不一致时工作流直接失败。
+
+npm 上 pi-endpoints 的 Trusted Publisher 配置为 GitHub Actions、`PosvdM/pi-endpoints`、工作流文件 `publish.yml`、不指定环境、允许 `npm publish`。改工作流文件名后要在 npm 上删掉旧配置并重建。仓库和包都是公开的，所以 npm 会自动为每次发布生成 provenance。
+
+Trusted Publishing 需要 npm 11.5.1 或更高版本和 GitHub 托管的运行器，工作流里会先把 npm 升到 11 的最新版。
