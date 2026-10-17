@@ -247,6 +247,13 @@ function prefixOf(id) {
 	const head = id.slice(id.lastIndexOf("/") + 1).split(/[-_.]/)[0].replace(/\d+$/, "").toLowerCase();
 	return head || "其他";
 }
+
+// 分组和前缀按钮的顺序：这几家按固定顺序排在前面，其余前缀按字母序排在后面。
+const PREFIX_ORDER = ["gpt", "claude", "gemini", "grok"];
+function byPrefix(a, b) {
+	const rank = (prefix) => (PREFIX_ORDER.includes(prefix) ? PREFIX_ORDER.indexOf(prefix) : PREFIX_ORDER.length);
+	return rank(a) - rank(b) || a.localeCompare(b);
+}
 let error = null;
 let toastTimer;
 
@@ -436,7 +443,7 @@ function renderModels(item) {
 		chips.replaceChildren(
 			chip("", "全部", models.length),
 			chip(ENABLED, "已启用", models.filter((model) => model.enabled).length),
-			...[...counts].sort(([a], [b]) => a.localeCompare(b)).map(([prefix, n]) => chip(prefix, prefix, n)),
+			...[...counts].sort(([a], [b]) => byPrefix(a, b)).map(([prefix, n]) => chip(prefix, prefix, n)),
 		);
 	}
 
@@ -472,7 +479,7 @@ function renderModels(item) {
 			} }, h("td", { colspan: 7 }, h("span", { class: "caret", html: CARET }), h("b", {}, title), summary)));
 			if (!closed) rows.push(...list.map((model) => modelRow(item, model)));
 		};
-		for (const [prefix, list] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+		for (const [prefix, list] of [...groups].sort(([a], [b]) => byPrefix(a, b))) {
 			list.sort(newestFirst);
 			const enabled = list.filter((model) => model.enabled).length;
 			section(prefix, prefix, list, `${list.length} 个${enabled ? `，已启用 ${enabled}` : ""}`);
