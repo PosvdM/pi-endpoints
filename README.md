@@ -2,6 +2,10 @@
 
 让 [pi](https://pi.dev) 通过你自己的 API 服务使用模型，例如自己部署的 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)、Magpie，或者基于 new-api / one-api 的中转站。
 
+![管理页的模型列表：gpt 组展开，显示开关、协议、上下文、最大输出和思考档位](https://raw.githubusercontent.com/PosvdM/pi-endpoints/main/docs/images/models.png)
+
+![模型详情：生效的参数及来源，下面是手动设置](https://raw.githubusercontent.com/PosvdM/pi-endpoints/main/docs/images/model-detail.png)
+
 - **只注册你选定的模型。** 服务上有几十个模型时，pi 的模型列表里只出现你启用的那几个。
 - **参数取自服务本身。** 上下文长度、最大输出、思考档位优先用服务端目录返回的值。pi 不会提供服务不支持的档位，例如在只支持 low 到 max 的 GPT 上，不会出现"关闭思考"。
 - **自动选择协议。** 每个模型按服务端信息和模型名，选用 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 或 Google Generative AI 协议，也可以手动指定。
@@ -32,17 +36,12 @@ pi install npm:pi-endpoints
 
 左栏列出所有服务，服务名旁的圆点表示是否已注册到 pi，红色表示有错误。选中一个服务后，页头显示地址、密钥状态和目录的刷新时间，"刷新目录"按钮立即读取服务上的模型列表，也可以用来测试连接。下面分"模型"和"服务设置"两页。
 
-![管理页的模型列表：gpt 组展开，显示开关、协议、上下文、最大输出和思考档位](https://raw.githubusercontent.com/PosvdM/pi-endpoints/main/docs/images/models.png)
-
 - **模型**：用开关启用或停用模型。列表按模型 id 的前缀分组，分组可以折叠。`gpt`、`claude`、`gemini`、`grok` 按这个顺序排在前面，其余前缀按字母序排在后面。每组按模型名里的版本号从新到旧排列，如 `gpt-6.1-sol`、`gpt-6-sol`、`gpt-5.6-sol`；名字里没有版本号的排在最后。列表上方的按钮可以只看已启用的模型或某个前缀的模型。在"已启用"里停用的模型先留在原处，方便改回来，再点一次"已启用"或刷新页面后移走。还可以按模型 id 或名称搜索，按协议和 `owned_by` 筛选；服务端标为隐藏（`visibility: hide`）的模型，以及名字里带 `image` 一词的图片生成模型，默认不显示，勾选"显示隐藏模型"后显示，也可以启用。上下文、最大输出和思考档位后面的圆点表示值的来源："服务端"、"pi 自带"（pi 内置的模型目录）、"手动"或"默认值"。用了默认值的模型标为"缺参数"，请手动补齐；已启用但服务上已经没有的模型标为"目录里没有"。
 - **模型详情**：点一个模型，右侧打开详情，列出生效的参数和各自的来源，下面是手动设置。可以覆盖名称、协议、地址、上下文、最大输出、输入类型、思考档位、请求头、compat 和价格，留空的项自动取值。思考档位填 pi 的档位名，如 `low, medium, high`；只填 `none` 表示不支持调节思考；和其他档位一起写 `none` 或 `off`，表示可以关闭思考。
-
-  ![模型详情：生效的参数及来源，下面是手动设置](https://raw.githubusercontent.com/PosvdM/pi-endpoints/main/docs/images/model-detail.png)
-
 - **发送测试消息**：在模型详情里，用当前生效的参数给模型发一条消息。失败时显示服务端返回的原文，中转站的错误信息常常直接说明了原因，例如提示不支持所选模型，多半是协议选错了。
 - **服务设置**：密钥，以及名字、显示名、地址、默认协议、密钥环境变量和加在这个服务所有请求上的请求头。请求头的值按原样发送，不解释 `$环境变量` 这类写法。密钥只能写入，页面只显示"已设置"或"未设置"，以及密钥来自文件还是环境变量。
 
-## 参数从哪里来
+## 参数来源
 
 每项参数按下面的顺序取值，越靠前越优先：
 
