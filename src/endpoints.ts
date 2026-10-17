@@ -178,22 +178,6 @@ export class Endpoints {
 		return this.service(service.name)?.baseUrl === service.baseUrl;
 	}
 
-	/** 刷新全部服务并重新注册。返回失败的服务和原因。 */
-	async refreshAll(signal?: AbortSignal): Promise<Map<string, string>> {
-		const failures = new Map<string, string>();
-		await Promise.all(
-			this.config.services.map(async (service) => {
-				try {
-					await this.refresh(service.name, signal);
-					this.register(service.name);
-				} catch (error) {
-					failures.set(service.name, describeError(error));
-				}
-			}),
-		);
-		return failures;
-	}
-
 	status(): ServiceStatus[] {
 		return this.config.services.map((service) => {
 			const catalog = this.cache[service.name];

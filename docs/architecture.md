@@ -12,7 +12,7 @@
 | `src/builtin.ts` | 在 pi 自带的模型目录里按名字查模型，判断模型原厂。 |
 | `src/resolve.ts` | 把目录、pi 自带目录和手动设置合并成 pi 的模型配置，记录每个值的来源；选择协议；生成 `thinkingLevelMap`。 |
 | `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、修改配置。 |
-| `src/commands.ts` | `/endpoints` 命令和终端里的模型勾选界面。 |
+| `src/commands.ts` | `/endpoints` 命令：启动管理页并打开浏览器。插件只有这一个命令，所有操作都在管理页里完成。 |
 | `src/web/server.ts` | 管理页的 HTTP 服务和接口。 |
 | `src/web/page.html` | 管理页前端，单个 HTML 文件，原生 JS，没有构建步骤。 |
 
@@ -155,11 +155,11 @@
 
 - 服务名必须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不能和 pi 自带的服务商同名。用 `registerProvider` 注册同名服务商并提供 `models` 时，会替换掉它全部的自带模型。
 - 没有密钥时不注册。pi 本身允许注册，但会让用户去 `/login` 输入密钥，和本插件的密钥管理冲突。
-- 已启用但目录里没有的模型仍然注册，用 pi 自带目录和默认值补齐参数。读过目录后，这类模型在管理页和 `/endpoints status` 里标为"目录里没有"；还没读过目录时不标。
+- 已启用但目录里没有的模型仍然注册，用 pi 自带目录和默认值补齐参数。读过目录后，这类模型在管理页里标为"目录里没有"；还没读过目录时不标。
 
 ## 管理页
 
-`startWebUI()` 在 `127.0.0.1` 的随机端口启动 HTTP 服务。`/endpoints ui` 保存的是启动用的 Promise，连按两次也只启动一个服务器。`session_shutdown`（退出、`/reload`、`/new`、`/resume`、`/fork`）时关闭。防护措施：
+`startWebUI()` 在 `127.0.0.1` 的随机端口启动 HTTP 服务。`/endpoints` 保存的是启动用的 Promise，连按两次也只启动一个服务器。`session_shutdown`（退出、`/reload`、`/new`、`/resume`、`/fork`）时关闭。防护措施：
 
 - 每次启动生成 24 字节的随机 token。页面地址带 `?token=`，页面把 token 写进 `<meta>`，之后的接口请求放在 `x-endpoints-token` 请求头里。先比较字节长度，再用 `timingSafeEqual` 比较内容。
 - `Host` 请求头必须是 `127.0.0.1:<端口>`，防止 DNS 重绑定。
@@ -179,10 +179,9 @@
 
 ## 依赖和导入
 
-- `@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent`、`@earendil-works/pi-tui` 由 pi 提供，放在 `peerDependencies: "*"`。`devDependencies` 里的同名包只用于类型检查和测试。
+- `@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent` 由 pi 提供，放在 `peerDependencies: "*"`。`devDependencies` 里的同名包只用于类型检查和测试。
 - pi 加载插件时把这些包名映射到宿主自己的副本。映射只覆盖包根和 `@earendil-works/pi-ai` 的 `compat`、`providers/all`、`oauth` 子路径，导入其他子路径会绕过映射。
 - 插件里的 `fetch` 在 pi 里会走 pi 配置的 HTTP 代理（pi 启动时替换全局 `fetch`）。单独用 Node 运行代码时，需要自己设置代理。
-- 命令输出服务端原文前用 `printable()` 去掉 ANSI 转义序列和控制字符，避免搅乱终端。
 - 只使用可以直接擦除的 TypeScript 语法（`tsconfig.json` 开启了 `erasableSyntaxOnly`），不用参数属性和 `enum`，这样代码也能被 Node 的类型擦除直接运行。
 
 ## 测试
@@ -203,4 +202,4 @@ pi -e . --list-models
 pi -e . --no-session -p --model cpa/gpt-6.1-sol:high "Reply with exactly: OK"
 ```
 
-非交互模式不执行扩展命令，`/endpoints` 需要在交互界面或 RPC 模式（`pi --mode rpc`）里测试。
+非交互模式不执行扩展命令，`/endpoints` 需要在交互界面或 RPC 模式（`pi --mode rpc`）里测试。管理页的接口可以绕开命令，直接用 `startWebUI()` 启动后请求。

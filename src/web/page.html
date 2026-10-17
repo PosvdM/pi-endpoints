@@ -409,7 +409,7 @@ api("state").then((data) => {
 	current = state.services[0]?.name ?? "";
 	render();
 }).catch((error) => {
-	$("#content").replaceChildren(h("div", { class: "msg err" }, `${error.message}。请在 pi 里重新运行 /endpoints ui。`));
+	$("#content").replaceChildren(h("div", { class: "msg err" }, `${error.message}。请在 pi 里重新运行 /endpoints。`));
 });
 </script>
 </body>

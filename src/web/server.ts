@@ -67,7 +67,7 @@ async function handle(endpoints: Endpoints, token: string, request: IncomingMess
 	const url = new URL(request.url ?? "/", `http://127.0.0.1:${port}`);
 
 	if (request.method === "GET" && url.pathname === "/") {
-		if (!sameToken(url.searchParams.get("token"), token)) throw new HttpError(403, "链接无效，请在 pi 里重新运行 /endpoints ui");
+		if (!sameToken(url.searchParams.get("token"), token)) throw new HttpError(403, "链接无效，请在 pi 里重新运行 /endpoints");
 		const html = readFileSync(PAGE, "utf8").replace("__TOKEN__", token);
 		response.writeHead(200, {
 			"Content-Type": "text/html; charset=utf-8",

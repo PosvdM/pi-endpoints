@@ -101,8 +101,8 @@ describe("Endpoints", () => {
 		const endpoints = new Endpoints(first.pi);
 		endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled: ["model-x"], overrides: {} });
 		endpoints.setKey("cpa", "sk-1");
-		const failures = await endpoints.refreshAll();
-		expect(failures.size).toBe(0);
+		await endpoints.refresh("cpa");
+		endpoints.register("cpa");
 		expect(first.providers.get("cpa")?.models?.[0]).toMatchObject({ id: "model-x", contextWindow: 500000 });
 
 		vi.unstubAllGlobals();
