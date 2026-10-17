@@ -46,7 +46,7 @@
 pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `mid-conversation-output-config-2026-07-01`），放在请求体的 `betas` 里，由 SDK 转成 `anthropic-beta` 请求头。模型的 `headers` 里只要有 `anthropic-beta`，pi 就用它整个替换这个列表，自己生成的 beta 全部丢掉。所以 Anthropic 协议的模型不把 `anthropic-beta` 交给 pi：
 
 - `splitBetas()` 把服务和模型请求头里的 `anthropic-beta` 拆出来，按逗号分开，放进 `ResolvedModel.betas`；`ResolvedModel.headers` 不再含这个头。其他协议的模型请求头原样保留。
-- 上下文超过 `LONG_CONTEXT_THRESHOLD`（200000）时，`betas` 里加上 `context-1m-2025-08-07`。CLIProxyAPI 只在调用方带了这个 beta 时才向 Claude 订阅账号申请 1M 上下文，而它的目录对这些模型报 1000000。不加的话，pi 按 1M 安排压缩，请求超过 200K 后被拒绝。
+- 原厂是 Anthropic（`vendorOf()`）且上下文超过 `LONG_CONTEXT_THRESHOLD`（200000）时，`betas` 里加上 `context-1m-2025-08-07`。经 Anthropic 协议提供的其他模型（如 Kimi）不加，那边的服务未必认识这个 beta。CLIProxyAPI 只在调用方带了这个 beta 时才向 Claude 订阅账号申请 1M 上下文，而它的目录对这些模型报 1000000。不加的话，pi 按 1M 安排压缩，请求超过 200K 后被拒绝。
 - `withBetas()` 包一层 `onPayload`，在 pi 组好的请求体上把 `betas` 追加进 `params.betas`，再交给调用方原有的 `onPayload`（pi 的 `before_provider_request` 事件就在那里）。
 - 服务商的 `streamSimple` 按模型 id 从 `Endpoints.betas` 里取 beta，调用 `withBetas()` 后交给 pi-ai 的 `streamSimpleAnthropic`。`Endpoints.betas` 在注册和 `refreshModels` 返回模型时更新。
 
@@ -192,7 +192,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `testModel` 返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`。
 - `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。
 
-模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写）；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排，参数规模（`120b`）和日期（`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。
+模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写）；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。
 
 `testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，Anthropic 协议的模型同样经过 `withBetas()`，不设置思考档位，超时 60 秒。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。
 

@@ -297,6 +297,8 @@ describe("Anthropic beta", () => {
 		expect(resolveModel(service(), { id: "claude-opus-5-5", ownedBy: "anthropic" }, catalog([])).betas).toEqual([LONG_CONTEXT_BETA]);
 		const small = service({ overrides: { "claude-opus-5-5": { contextWindow: 200000 } } });
 		expect(resolveModel(small, { id: "claude-opus-5-5", ownedBy: "anthropic" }, catalog([])).betas).toEqual([]);
+		const kimi = service({ overrides: { "kimi-k3": { api: "anthropic-messages", contextWindow: 256000 } } });
+		expect(resolveModel(kimi, { id: "kimi-k3", ownedBy: "moonshot" }, catalog([])).betas).toEqual([]);
 	});
 
 	it("请求头里的 anthropic-beta 拆出来合并，其他协议原样保留", () => {

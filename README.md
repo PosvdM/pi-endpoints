@@ -53,7 +53,7 @@ pi install npm:pi-endpoints
 
 ## Anthropic 的 beta 请求头
 
-走 Anthropic 协议的模型，上下文超过 200000 时，插件自动在请求里加上 `anthropic-beta: context-1m-2025-08-07`。CLIProxyAPI 这类背后是 Claude 订阅账号的服务，只有请求带上它才提供 1M 上下文。不需要时，在模型的手动设置里把上下文改成 200000，就不会再加。
+走 Anthropic 协议的 Claude 模型，上下文超过 200000 时，插件自动在请求里加上 `anthropic-beta: context-1m-2025-08-07`。CLIProxyAPI 这类背后是 Claude 订阅账号的服务，只有请求带上它才提供 1M 上下文。不需要时，在模型的手动设置里把上下文改成 200000，就不会再加。
 
 在服务或模型的请求头里写的 `anthropic-beta`，会追加到 pi 自己按模型能力生成的 beta 列表里，多个值用逗号分开。
 

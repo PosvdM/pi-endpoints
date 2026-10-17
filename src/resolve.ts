@@ -227,7 +227,7 @@ export function resolveModel(
 	// 价格一律按官方 API，GPT 也找 openai，不找订阅版。
 	const costFrom = vendor ? findBuiltinIn(vendor, model.id) : undefined;
 	const contextWindow = pick(override?.contextWindow, model.contextWindow, builtin?.contextWindow, DEFAULTS.contextWindow);
-	const { headers, betas } = splitBetas({ ...service.headers, ...override?.headers }, api.value, contextWindow.value);
+	const { headers, betas } = splitBetas({ ...service.headers, ...override?.headers }, api.value, contextWindow.value, vendor === "anthropic");
 
 	return {
 		id: model.id,

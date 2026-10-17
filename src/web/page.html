@@ -168,7 +168,7 @@ tr.group b { color: var(--text); font-weight: 600; font-size: 12.5px; margin-rig
 .drawer-body { flex: 1; overflow: auto; padding: 18px 22px 28px; }
 .drawer-foot { padding: 12px 22px; border-top: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
 .section-title { font-size: 12px; color: var(--faint); letter-spacing: .04em; margin: 22px 0 10px; }
-.section-title:first-child { margin-top: 0; }
+#drawer-error + .section-title { margin-top: 0; }
 .kv { display: grid; grid-template-columns: 96px 1fr; gap: 7px 14px; font-size: 13px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; word-break: break-word; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -214,7 +214,8 @@ const CARET = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" strok
 
 /**
  * 模型名里的版本号，用来把新模型排在前面：gpt-6.1-sol → [6, 1]，claude-opus-4-6-thinking → [4, 6]，
- * qwen3-coder → [3]。120b、9B 这类参数规模和 20250929 这类日期不算版本号；没有版本号时返回空数组。
+ * qwen3-coder → [3]，gpt-4o → [4]。120b、9B 这类参数规模，以及 2024-08-06、20250929 这类日期不算版本号；
+ * 没有版本号时返回空数组。
  */
 function versionOf(id) {
 	const parts = id.slice(id.lastIndexOf("/") + 1).toLowerCase().split("-");
@@ -222,8 +223,9 @@ function versionOf(id) {
 	const lead = parts[0].match(/\d+(?:\.\d+)*$/);
 	if (lead) version.push(...lead[0].split(".").map(Number));
 	for (const part of parts.slice(1)) {
-		const match = /^v?(\d{1,5}(?:\.\d+)*)$/.exec(part);
-		if (match) version.push(...match[1].split(".").map(Number));
+		// 版本号最多三位数字，可以带一个字母后缀（4o），但 b、k、m 是参数规模（120b）。
+		const match = /^v?(\d{1,3}(?:\.\d+)*)([a-z]?)$/.exec(part);
+		if (match && !"bkm".includes(match[2] || "-")) version.push(...match[1].split(".").map(Number));
 		else if (version.length) break;
 	}
 	return version;
@@ -297,11 +299,14 @@ async function run(path, body, okText) {
 		if (data.services) state = data;
 		error = data.refreshError ? `刷新失败：${data.refreshError}` : null;
 		render();
+		$("#drawer-error")?.replaceChildren();
 		if (okText && !data.refreshError) toast(okText);
 		return data;
 	} catch (failure) {
 		error = failure.message;
 		render();
+		// 详情面板盖住了页面顶部的错误提示，在面板里也显示一份。
+		$("#drawer-error")?.replaceChildren(h("div", { class: "banner err" }, failure.message));
 		return undefined;
 	}
 }
@@ -338,6 +343,8 @@ function positiveInt(text, label) {
 function select(item) {
 	current = item;
 	tab = "models";
+	// 筛选条件按服务各自的模型生成，换服务后不再适用。
+	Object.assign(view, { api: "", owner: "", prefix: "" });
 	openModel = null;
 	error = null;
 	render();
@@ -442,7 +449,7 @@ function renderModels(item) {
 			!view.prefix || (view.prefix === ENABLED ? pinned.get(item.name).has(model.id) : prefixOf(model.id) === view.prefix));
 		count.textContent = `显示 ${models.length} / ${item.models.length}`;
 		if (models.length === 0) {
-			const empty = !item.models.length ? "目录是空的。设置好密钥后点“刷新目录”。" : view.prefix === ENABLED ? "还没有启用模型" : "没有符合条件的模型";
+			const empty = !item.models.length ? "目录是空的。设置好密钥后点“刷新目录”。" : view.prefix === ENABLED && !item.models.some((model) => model.enabled) ? "还没有启用模型" : "没有符合条件的模型";
 			box.replaceChildren(h("div", { class: "table-wrap" }, h("div", { class: "empty" }, empty)));
 			return;
 		}
@@ -456,10 +463,11 @@ function renderModels(item) {
 		const section = (key, title, list, summary) => {
 			const rows = [];
 			cards.push(rows);
-			const closed = collapsed.has(key);
+			const id = `${item.name}/${key}`;
+			const closed = collapsed.has(id);
 			rows.push(h("tr", { class: `group${closed ? " collapsed" : ""}`, onclick: () => {
-				if (closed) collapsed.delete(key);
-				else collapsed.add(key);
+				if (closed) collapsed.delete(id);
+				else collapsed.add(id);
 				renderTable();
 			} }, h("td", { colspan: 7 }, h("span", { class: "caret", html: CARET }), h("b", {}, title), summary)));
 			if (!closed) rows.push(...list.map((model) => modelRow(item, model)));
@@ -520,7 +528,10 @@ function renderDrawer() {
 		h("div", { class: "scrim", onclick: close }),
 		h("div", { class: "drawer" },
 			h("div", { class: "drawer-head" },
-				h("input", { type: "checkbox", class: "switch", style: "margin-top:4px", title: "启用", checked: model.enabled || undefined, onchange: (event) => run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }) }),
+				h("input", { type: "checkbox", class: "switch", style: "margin-top:4px", title: "启用", checked: model.enabled || undefined, onchange: async (event) => {
+					// 详情面板不随 render() 重建，失败时自己把开关拨回去。
+					if (!(await run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }))) event.target.checked = !event.target.checked;
+				} }),
 				h("div", { class: "grow" }, h("div", { class: "model-id" }, model.id), h("div", { class: "model-name" }, model.name.value)),
 				h("button", { class: "close", title: "关闭", onclick: close }, "×"),
 			),
@@ -560,7 +571,7 @@ function overrideForm(item, model) {
 	const baseUrl = h("input", { class: "input", type: "text", value: o.baseUrl ?? "", placeholder: "自动：按协议拼接" });
 	field("地址", baseUrl);
 	const ctx = h("input", { class: "input", type: "number", value: o.contextWindow ?? "", placeholder: String(model.contextWindow.value) });
-	field("上下文", ctx, model.api.value === "anthropic-messages" ? "超过 200000 时自动带上 context-1m beta；不想要就填 200000" : null);
+	field("上下文", ctx, model.betas.includes(LONG_CONTEXT_BETA) ? "超过 200000 时自动带上 context-1m beta；不想要就填 200000" : null);
 	const max = h("input", { class: "input", type: "number", value: o.maxTokens ?? "", placeholder: String(model.maxTokens.value) });
 	field("最大输出", max);
 	const input = h("select", { class: "input" }, h("option", { value: "" }, "自动"), h("option", { value: "text" }, "仅文本"), h("option", { value: "text,image" }, "文本和图片"));
@@ -627,6 +638,7 @@ function overrideForm(item, model) {
 
 	return [
 		h("div", { class: "drawer-body" },
+			h("div", { id: "drawer-error" }),
 			h("div", { class: "section-title" }, "生效的参数"),
 			effective,
 			h("div", { class: "section-title" }, "手动设置 · 留空的项自动取值"),
@@ -705,6 +717,7 @@ function renderDanger(item) {
 			if (!confirm(`删除服务 ${item.name}？它的密钥和目录缓存也会删除。`)) return;
 			if (await run("removeService", { name: item.name }, "已删除")) {
 				current = state.services[0]?.name ?? "";
+				tab = "models";
 				openModel = null;
 				render();
 			}
