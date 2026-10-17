@@ -10,11 +10,10 @@
 
 ## 安装
 
-需要 pi 1.3.0 或更高版本。本插件还没有发布到 npm，可以从本地目录或 git 安装：
+需要 pi 1.3.0 或更高版本。
 
 ```bash
-pi install ./pi-endpoints
-pi install git:github.com/PosvdM/pi-endpoints
+pi install npm:pi-endpoints
 ```
 
 ## 快速上手
@@ -93,4 +92,4 @@ npm test        # 单元测试
 pi -e .         # 在 pi 里加载当前目录试用
 ```
 
-架构、数据格式和设计约束见 [技术文档](docs/architecture.md)。
+架构、数据格式和设计约束见 [技术文档](https://github.com/PosvdM/pi-endpoints/blob/main/docs/architecture.md)。
