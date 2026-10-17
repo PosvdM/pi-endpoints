@@ -252,3 +252,36 @@ describe("Endpoints 的校验和并发", () => {
 		expect(endpoints.status().map((status) => status.error)).toEqual([expect.stringContaining("自带"), expect.stringContaining("地址")]);
 	});
 });
+
+describe("Anthropic beta", () => {
+	it("请求头里的 anthropic-beta 和 1M 上下文 beta 追加到 pi 自己的 beta 列表", async () => {
+		const { pi, providers } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({
+			name: "a",
+			baseUrl: "https://a.test",
+			headers: { "anthropic-beta": "x-test-beta", "X-Title": "pi" },
+			enabled: ["claude-opus-5-5"],
+			overrides: {},
+		});
+		endpoints.setKey("a", "k");
+		const provider = providers.get("a");
+		const config = provider?.models?.[0];
+		expect(config?.headers).toEqual({ "X-Title": "pi" });
+
+		let sent: Headers | undefined;
+		vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+			sent = new Headers(init.headers);
+			return new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "stop" } }), { status: 400 });
+		});
+		const model = { ...config, provider: "a" } as never;
+		const stream = provider?.streamSimple?.(model, { messages: [{ role: "user", content: "hi", timestamp: 0 }] } as never, { apiKey: "k" });
+		await stream?.result();
+		const betas = sent?.get("anthropic-beta")?.split(",") ?? [];
+		expect(betas).toContain("x-test-beta");
+		expect(betas).toContain("context-1m-2025-08-07");
+		// pi 自己算出的 beta 仍在
+		expect(betas.length).toBeGreaterThan(2);
+		expect(sent?.get("x-title")).toBe("pi");
+	});
+});

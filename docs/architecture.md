@@ -11,6 +11,7 @@
 | `src/catalog.ts` | 请求和解析服务端模型目录。 |
 | `src/builtin.ts` | 在 pi 自带的模型目录里按名字查模型，判断模型原厂。 |
 | `src/resolve.ts` | 把目录、pi 自带目录和手动设置合并成 pi 的模型配置，记录每个值的来源；选择协议；生成 `thinkingLevelMap`。 |
+| `src/betas.ts` | 决定 Anthropic 协议的模型要追加哪些 beta，并在请求体上追加。 |
 | `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、修改配置。 |
 | `src/commands.ts` | `/endpoints` 命令：启动管理页并打开浏览器。插件只有这一个命令，所有操作都在管理页里完成。 |
 | `src/web/server.ts` | 管理页的 HTTP 服务和接口。 |
@@ -37,6 +38,21 @@
 这种写法下，`refreshModels` 返回的结果 pi 只放在内存里，不会存盘，所以插件自己维护 `endpoints-cache.json`，保证服务连不上时也能启动。
 
 插件加载后再次调用 `registerProvider` 会立即生效，所以配置修改不需要重启 pi。
+
+注册时还提供 `api: "anthropic-messages"` 和 `streamSimple`，接管这个服务上 Anthropic 协议模型的请求，用来追加 beta（见下一节）。pi 只在模型的 `api` 等于服务商的 `api` 时才调用服务商的 `streamSimple`，其他协议的模型仍走 pi 自带的实现。每个模型都写明了 `api`，服务商上的 `api` 不会被当作模型的默认协议。
+
+## Anthropic beta
+
+pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `mid-conversation-output-config-2026-07-01`），放在请求体的 `betas` 里，由 SDK 转成 `anthropic-beta` 请求头。模型的 `headers` 里只要有 `anthropic-beta`，pi 就用它整个替换这个列表，自己生成的 beta 全部丢掉。所以 Anthropic 协议的模型不把 `anthropic-beta` 交给 pi：
+
+- `splitBetas()` 把服务和模型请求头里的 `anthropic-beta` 拆出来，按逗号分开，放进 `ResolvedModel.betas`；`ResolvedModel.headers` 不再含这个头。其他协议的模型请求头原样保留。
+- 上下文超过 `LONG_CONTEXT_THRESHOLD`（200000）时，`betas` 里加上 `context-1m-2025-08-07`。CLIProxyAPI 只在调用方带了这个 beta 时才向 Claude 订阅账号申请 1M 上下文，而它的目录对这些模型报 1000000。不加的话，pi 按 1M 安排压缩，请求超过 200K 后被拒绝。
+- `withBetas()` 包一层 `onPayload`，在 pi 组好的请求体上把 `betas` 追加进 `params.betas`，再交给调用方原有的 `onPayload`（pi 的 `before_provider_request` 事件就在那里）。
+- 服务商的 `streamSimple` 按模型 id 从 `Endpoints.betas` 里取 beta，调用 `withBetas()` 后交给 pi-ai 的 `streamSimpleAnthropic`。`Endpoints.betas` 在注册和 `refreshModels` 返回模型时更新。
+
+插件事件 `before_provider_request` 也能改请求体，但它拿不到模型信息，压缩和分支摘要的请求也不经过它，所以不用。
+
+在 CLIProxyAPI 上验证过：Claude Sonnet 5.5 和 Claude Opus 5.5 带上 `context-1m-2025-08-07` 后，短消息正常返回。
 
 ## 文件格式
 
@@ -92,6 +108,7 @@
 - 输入类型只保留 `text` 和 `image`，pi 不认识的（如 `pdf`）丢掉。
 - `supported_reasoning_levels` 缺失时为 `undefined`（未知，交给下一层），为空数组时表示服务端明确不支持调节思考。
 - `visibility: "hide"` 的模型标为隐藏，列表里默认不显示，但仍可启用。
+- `resolveModel()` 另外把名字里有独立 `image` 一词的模型（如 `gpt-image-2`、`gemini-3.1-flash-image`）标为隐藏。它们是图片生成模型，pi 不能拿来对话，而 CLIProxyAPI 只把 `gpt-image-*` 标成了 `hide`。
 
 ## 合并参数
 
@@ -175,7 +192,9 @@
 - `testModel` 返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`。
 - `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。
 
-`testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，不设置思考档位，超时 60 秒。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。
+模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写）；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排，参数规模（`120b`）和日期（`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。
+
+`testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，Anthropic 协议的模型同样经过 `withBetas()`，不设置思考档位，超时 60 秒。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。
 
 ## 依赖和导入
 
@@ -189,8 +208,8 @@
 `npm test` 运行 `test/` 下的单元测试：
 
 - `catalog.test.ts`：目录解析、合并和请求顺序，用 `vi.stubGlobal("fetch")` 模拟服务端。
-- `resolve.test.ts`：参数分层、思考档位、协议选择、compat 和价格规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录。
-- `endpoints.test.ts`：注册条件、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件。
+- `resolve.test.ts`：参数分层、思考档位、协议选择、compat、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录。
+- `endpoints.test.ts`：注册条件、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple` 发出的真实请求里，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
 - `web.test.ts`：管理页的 token、Host 和 JSON 检查，以及各项操作。
 
 `test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。

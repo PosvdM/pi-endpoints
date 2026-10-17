@@ -8,78 +8,245 @@
 <style>
 :root {
 	color-scheme: light dark;
-	--bg: #f7f7f8; --panel: #fff; --text: #1d1d1f; --muted: #6b6b73; --line: #e2e2e6;
-	--accent: #2f6fde; --danger: #c8372d; --ok: #1f8a4c; --warn: #b26a00; --chip: #eef0f4;
+	--bg: #f5f6f8; --panel: #fff; --subtle: #f0f1f4; --hover: #f6f7fa; --text: #17181c; --muted: #6b7080; --faint: #9a9eab;
+	--line: #e3e5ea; --line-strong: #d3d6dd; --accent: #3a66f0; --accent-soft: #e9eefe; --accent-text: #2a52cf;
+	--danger: #d03b31; --danger-soft: #fdecea; --ok: #1d8a4f; --ok-soft: #e6f4ec; --warn: #b5650a; --warn-soft: #fdf1e1;
+	--pi: #7a64d8; --shadow: 0 10px 40px rgba(20, 22, 30, .14), 0 2px 8px rgba(20, 22, 30, .06);
+	--mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
 }
 @media (prefers-color-scheme: dark) {
-	:root { --bg: #151517; --panel: #1e1e21; --text: #ececf0; --muted: #9a9aa3; --line: #303035; --accent: #6d9cff; --danger: #ff6b5e; --ok: #4cc27f; --warn: #e3a33b; --chip: #2a2a2f; }
+	:root {
+		--bg: #0e0f11; --panel: #16171a; --subtle: #1d1f23; --hover: #1b1d21; --text: #e7e8eb; --muted: #8d919c; --faint: #636774;
+		--line: #26282d; --line-strong: #33363c; --accent: #6b8fff; --accent-soft: #1e2640; --accent-text: #9ab2ff;
+		--danger: #ff6f63; --danger-soft: #3a1c1a; --ok: #4cc283; --ok-soft: #15291e; --warn: #eaa74a; --warn-soft: #33250f;
+		--pi: #a796ff; --shadow: 0 10px 40px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .3);
+	}
 }
 * { box-sizing: border-box; }
-body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
-header { padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; align-items: baseline; gap: 12px; }
-header h1 { font-size: 16px; margin: 0; }
-header span { color: var(--muted); font-size: 12px; }
-main { display: grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 49px); }
-nav { border-right: 1px solid var(--line); padding: 12px; background: var(--panel); }
-nav button.service { display: flex; width: 100%; justify-content: space-between; align-items: center; text-align: left; background: none; border: 0; padding: 8px 10px; border-radius: 6px; color: inherit; cursor: pointer; font: inherit; }
-nav button.service.active { background: var(--chip); font-weight: 600; }
-section { padding: 16px 20px; max-width: 1200px; }
-h2 { font-size: 15px; margin: 20px 0 10px; }
-h2:first-child { margin-top: 0; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
-.grid { display: grid; grid-template-columns: 140px 1fr; gap: 8px 12px; align-items: center; }
-.grid label { color: var(--muted); }
-input[type=text], input[type=password], input[type=number], select, textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; width: 100%; }
-textarea { font-family: ui-monospace, Consolas, monospace; font-size: 12px; min-height: 52px; }
-button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: inherit; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.danger { color: var(--danger); }
-button:disabled { opacity: .5; cursor: default; }
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.hint { color: var(--muted); font-size: 12px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); }
-.dot.on { background: var(--ok); }
-.dot.err { background: var(--danger); }
-.msg { margin-top: 10px; padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
-.msg.err { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
-.msg.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
-table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-weight: 600; color: var(--muted); font-size: 12px; background: var(--bg); }
-tr.model { cursor: pointer; }
-tr.model:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-tr.model.open td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-td.id { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-.src { display: inline-block; font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--chip); color: var(--muted); margin-left: 4px; white-space: nowrap; }
-.src.manual { color: var(--accent); }
-.src.default { color: var(--warn); }
+html, body { height: 100%; }
+body { margin: 0; font: 13.5px/1.5 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+button, input, select, textarea { font: inherit; color: inherit; }
+.mono { font-family: var(--mono); }
+
+/* 布局 */
+.app { display: grid; grid-template-columns: 232px 1fr; height: 100vh; }
+aside { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.brand { padding: 16px 18px 14px; display: flex; align-items: center; gap: 10px; }
+.brand .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--text); color: var(--panel); display: grid; place-items: center; font: 600 13px var(--mono); }
+.brand b { font-size: 14px; font-weight: 600; }
+.side-label { padding: 10px 18px 6px; font-size: 11.5px; color: var(--faint); letter-spacing: .04em; }
+.services { flex: 1; overflow: auto; padding: 0 10px; }
+.svc { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: none; text-align: left; cursor: pointer; }
+.svc:hover { background: var(--hover); }
+.svc.active { background: var(--subtle); }
+.svc .meta { flex: 1; min-width: 0; }
+.svc .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.svc .sub { font-size: 12px; color: var(--muted); }
+.side-foot { padding: 12px 10px 14px; border-top: 1px solid var(--line); }
+.side-foot p { margin: 10px 8px 0; font-size: 11.5px; color: var(--faint); }
+main { overflow: auto; min-width: 0; }
+.page { max-width: 1240px; margin: 0 auto; padding: 22px 32px 48px; }
+
+/* 状态点 */
+.status { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.status.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.status.err { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+
+/* 服务标题 */
+.head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
+.head .info { flex: 1; min-width: 0; }
+.head h1 { margin: 0; font-size: 20px; font-weight: 650; display: flex; align-items: center; gap: 10px; }
+.facts { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 6px; color: var(--muted); font-size: 12.5px; }
+.facts .mono { color: var(--text); font-size: 12px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--subtle); color: var(--muted); }
+.pill.on { background: var(--ok-soft); color: var(--ok); }
+.pill.err { background: var(--danger-soft); color: var(--danger); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+
+/* 按钮和输入 */
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 13px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); cursor: pointer; white-space: nowrap; font-weight: 500; }
+.btn:hover:not(:disabled) { background: var(--hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.06); background: var(--accent); }
+.btn.danger { color: var(--danger); }
+.btn.ghost { border-color: transparent; background: none; }
+.btn.small { height: 28px; padding: 0 10px; font-size: 12.5px; }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.block { width: 100%; justify-content: center; }
+.input, select.input, textarea.input { height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); width: 100%; outline: none; }
+textarea.input { height: auto; min-height: 64px; padding: 7px 10px; font: 12px/1.5 var(--mono); resize: vertical; }
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input::placeholder { color: var(--faint); }
+
+/* 提示 */
+.banner { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+.banner.err { background: var(--danger-soft); color: var(--danger); }
+.banner.warn { background: var(--warn-soft); color: var(--warn); align-items: center; }
+.banner .grow { flex: 1; }
+.toast { position: fixed; right: 24px; bottom: 24px; padding: 9px 16px; border-radius: 10px; background: var(--text); color: var(--panel); font-size: 13px; box-shadow: var(--shadow); opacity: 0; transform: translateY(8px); transition: .18s; pointer-events: none; z-index: 30; }
+.toast.show { opacity: 1; transform: none; }
+
+/* 标签页 */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+.tab { border: 0; background: none; padding: 9px 14px; cursor: pointer; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--text); }
+.tab .count { margin-left: 6px; font-size: 11.5px; color: var(--faint); font-weight: 400; }
+
+/* 工具栏 */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.search { position: relative; width: 260px; }
+.search svg { position: absolute; left: 10px; top: 9px; color: var(--faint); }
+.search .input { padding-left: 32px; }
+.toolbar select.input { width: auto; min-width: 128px; }
+.check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; user-select: none; }
+.spacer { flex: 1; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 12px; margin: 10px 2px 0; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+/* 模型表 */
+.table-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.table-wrap + .table-wrap { margin-top: 16px; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th { text-align: left; font-weight: 500; font-size: 12px; color: var(--muted); padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--subtle); white-space: nowrap; }
+td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+tbody tr:last-child td { border-bottom: 0; }
+td.toggle { overflow: visible; text-overflow: clip; }
+tbody tr { cursor: pointer; }
+tbody tr:hover td { background: var(--hover); }
+tbody tr.open td { background: var(--accent-soft); }
+tr.group td { background: var(--subtle) !important; padding: 7px 12px; font-size: 12px; color: var(--muted); user-select: none; }
+tr.group:hover td { color: var(--text); }
+tr.group .caret { display: inline-flex; width: 18px; vertical-align: -2px; color: var(--muted); transition: transform .12s; }
+tr.group.collapsed .caret { transform: rotate(-90deg); }
+tr.group b { color: var(--text); font-weight: 600; font-size: 12.5px; margin-right: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.chip { height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); cursor: pointer; font: 12.5px var(--mono); color: var(--muted); }
+.chip:hover { color: var(--text); border-color: var(--line-strong); }
+.chip.active { background: var(--text); border-color: var(--text); color: var(--panel); }
+.chip .n { margin-left: 5px; opacity: .65; font-family: system-ui, sans-serif; }
+.model-id { font: 500 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; }
+.model-name { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.num { font-variant-numeric: tabular-nums; }
+.val { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+.val > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.src { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.src.server { background: var(--ok); }
+.src.pi { background: var(--pi); }
+.src.manual { background: var(--accent); }
+.src.default { background: var(--warn); }
+.api { font: 11.5px var(--mono); padding: 1px 7px; border-radius: 6px; background: var(--subtle); color: var(--muted); }
+.levels { font-size: 12px; color: var(--muted); }
+.tag { display: inline-block; font-size: 11px; line-height: 17px; padding: 0 6px; border-radius: 5px; background: var(--subtle); color: var(--muted); margin-left: 6px; vertical-align: 1px; font-family: system-ui, sans-serif; font-weight: 500; }
+.tag.warn { background: var(--warn-soft); color: var(--warn); }
+.tag.accent { background: var(--accent-soft); color: var(--accent-text); }
 .warn { color: var(--warn); }
-.detail td { background: var(--bg); padding: 12px 16px; }
-.detail .grid { grid-template-columns: 110px 1fr 150px; }
-.empty { color: var(--muted); padding: 40px 0; text-align: center; }
+.empty { padding: 56px 0; text-align: center; color: var(--muted); }
+
+/* 开关 */
+.switch { appearance: none; -webkit-appearance: none; width: 30px; height: 18px; border-radius: 999px; background: var(--line-strong); position: relative; cursor: pointer; transition: background .15s; margin: 0; vertical-align: middle; flex: none; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s; }
+.switch:checked { background: var(--accent); }
+.switch:checked::after { transform: translateX(12px); }
+
+/* 卡片和表单 */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; max-width: 760px; }
+.card h3 { margin: 0 0 14px; font-size: 14px; font-weight: 600; }
+.card.danger { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); }
+.form { display: grid; grid-template-columns: 128px 1fr; gap: 14px 16px; align-items: start; }
+.form > label { padding-top: 6px; color: var(--muted); }
+.hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
+.actions { display: flex; gap: 8px; align-items: center; margin-top: 18px; }
+.key-row { display: flex; gap: 8px; }
+
+/* 详情抽屉 */
+.scrim { position: fixed; inset: 0; background: rgba(10, 12, 16, .28); z-index: 10; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); background: var(--panel); border-left: 1px solid var(--line); box-shadow: var(--shadow); z-index: 11; display: flex; flex-direction: column; }
+.drawer-head { padding: 18px 22px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: flex-start; }
+.drawer-head .grow { flex: 1; min-width: 0; }
+.drawer-head .model-id { font-size: 14px; white-space: normal; word-break: break-all; }
+.drawer-body { flex: 1; overflow: auto; padding: 18px 22px 28px; }
+.drawer-foot { padding: 12px 22px; border-top: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+.section-title { font-size: 12px; color: var(--faint); letter-spacing: .04em; margin: 22px 0 10px; }
+.section-title:first-child { margin-top: 0; }
+.kv { display: grid; grid-template-columns: 96px 1fr; gap: 7px 14px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; word-break: break-word; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.srctext { font-size: 11.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
+.drawer .form { grid-template-columns: 96px 1fr; gap: 12px 14px; }
+.result { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font: 12px/1.55 var(--mono); white-space: pre-wrap; word-break: break-all; }
+.result.ok { background: var(--ok-soft); color: var(--ok); }
+.result.err { background: var(--danger-soft); color: var(--danger); }
+.close { width: 30px; height: 30px; border: 0; border-radius: 8px; background: none; cursor: pointer; color: var(--muted); font-size: 18px; line-height: 1; }
+.close:hover { background: var(--hover); color: var(--text); }
 </style>
 </head>
 <body>
-<header><h1>pi-endpoints 管理页</h1><span>修改会立即保存并在 pi 里生效</span></header>
-<main>
-	<nav>
-		<div id="services"></div>
-		<button id="add" style="margin-top:8px;width:100%">＋ 添加服务</button>
-	</nav>
-	<section id="content"></section>
-</main>
+<div class="app">
+	<aside>
+		<div class="brand"><div class="logo">π</div><b>pi-endpoints</b></div>
+		<div class="side-label">服务</div>
+		<div class="services" id="services"></div>
+		<div class="side-foot">
+			<button class="btn block" id="add">＋ 添加服务</button>
+			<p>修改会立即保存并在 pi 里生效</p>
+		</div>
+	</aside>
+	<main><div class="page" id="content"></div></main>
+</div>
+<div id="drawer"></div>
+<div class="toast" id="toast"></div>
 <script>
 "use strict";
 const TOKEN = document.querySelector('meta[name="endpoints-token"]').content;
-const SOURCE = { manual: "手动", server: "服务端", pi: "pi 自带", default: "默认值", native_endpoints: "native_endpoints", owned_by: "owned_by", name: "按名字", };
-const API_SOURCE_DEFAULT = "服务默认";
+const SOURCE = { manual: "手动", server: "服务端", pi: "pi 自带", default: "默认值", native_endpoints: "native_endpoints", owned_by: "owned_by", name: "按名字" };
+const LONG_CONTEXT_BETA = "context-1m-2025-08-07";
 let state = { services: [], apis: [] };
 let current = null; // 当前服务名；"" 表示新建
+let tab = "models";
 let openModel = null;
-let filter = "";
-let onlyEnabled = false;
-let showHidden = false;
-let notice = null; // { ok, text }
+const view = { text: "", api: "", owner: "", hidden: false, prefix: "" };
+const ENABLED = " enabled"; // view.prefix 取这个值时只看已启用的模型
+const collapsed = new Set(); // 折叠的前缀分组
+// 服务名 → 点"已启用"按钮时已启用的模型 id。这一页只列这些：停用的先留着，方便改回来，再点一次按钮或刷新页面后移走。
+const pinned = new Map();
+const CARET = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+
+/**
+ * 模型名里的版本号，用来把新模型排在前面：gpt-6.1-sol → [6, 1]，claude-opus-4-6-thinking → [4, 6]，
+ * qwen3-coder → [3]。120b、9B 这类参数规模和 20250929 这类日期不算版本号；没有版本号时返回空数组。
+ */
+function versionOf(id) {
+	const parts = id.slice(id.lastIndexOf("/") + 1).toLowerCase().split("-");
+	const version = [];
+	const lead = parts[0].match(/\d+(?:\.\d+)*$/);
+	if (lead) version.push(...lead[0].split(".").map(Number));
+	for (const part of parts.slice(1)) {
+		const match = /^v?(\d{1,5}(?:\.\d+)*)$/.exec(part);
+		if (match) version.push(...match[1].split(".").map(Number));
+		else if (version.length) break;
+	}
+	return version;
+}
+
+// 版本号大的在前，版本号相同时按名字排序，没有版本号的放最后。
+function newestFirst(a, b) {
+	const va = versionOf(a.id);
+	const vb = versionOf(b.id);
+	for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+		const diff = (vb[i] ?? -1) - (va[i] ?? -1);
+		if (diff) return diff;
+	}
+	return a.id.localeCompare(b.id);
+}
+
+// 模型 id 的前缀：去掉 / 之前的部分，取第一段，去掉末尾的版本号，如 gpt-6.1-sol → gpt、qwen3-coder → qwen。
+function prefixOf(id) {
+	const head = id.slice(id.lastIndexOf("/") + 1).split(/[-_.]/)[0].replace(/\d+$/, "").toLowerCase();
+	return head || "其他";
+}
+let error = null;
+let toastTimer;
 
 const $ = (sel, root = document) => root.querySelector(sel);
 function h(tag, attrs = {}, ...children) {
@@ -89,6 +256,7 @@ function h(tag, attrs = {}, ...children) {
 		if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
 		else if (key === "class") el.className = value;
 		else if (key === "value") el.value = value;
+		else if (key === "html") el.innerHTML = value;
 		else if (value === true) el.setAttribute(key, "");
 		else el.setAttribute(key, value);
 	}
@@ -98,7 +266,19 @@ function h(tag, attrs = {}, ...children) {
 	}
 	return el;
 }
-const src = (source, label) => h("span", { class: `src ${source}` }, label ?? SOURCE[source] ?? source);
+
+// 协议和 owned_by 那类来源只在详情里显示文字，表格里只用颜色点表示参数来源。
+const dot = (source) => h("span", { class: `src ${source}`, title: SOURCE[source] ?? source });
+const srcText = (source, label) => h("span", { class: "srctext" }, ["server", "pi", "manual", "default"].includes(source) ? dot(source) : null, label ?? SOURCE[source] ?? source);
+
+function short(n) {
+	if (typeof n !== "number") return "";
+	const trim = (value, digits) => String(Number(value.toFixed(digits)));
+	if (n >= 1e6) return `${trim(n / 1e6, 2)}M`;
+	if (n >= 1e3) return `${trim(n / 1e3, 1)}K`;
+	return String(n);
+}
+const full = (n) => (typeof n === "number" ? n.toLocaleString() : "");
 
 async function api(path, body) {
 	const response = await fetch(`/api/${path}`, {
@@ -115,31 +295,27 @@ async function run(path, body, okText) {
 	try {
 		const data = await api(path, body);
 		if (data.services) state = data;
-		notice = data.refreshError ? { ok: false, text: `刷新失败：${data.refreshError}` } : okText ? { ok: true, text: okText } : null;
+		error = data.refreshError ? `刷新失败：${data.refreshError}` : null;
 		render();
+		if (okText && !data.refreshError) toast(okText);
 		return data;
-	} catch (error) {
-		notice = { ok: false, text: error.message };
+	} catch (failure) {
+		error = failure.message;
 		render();
 		return undefined;
 	}
 }
 
-function service() {
-	return state.services.find((item) => item.name === current);
+function toast(text) {
+	const el = $("#toast");
+	el.textContent = text;
+	el.classList.add("show");
+	clearTimeout(toastTimer);
+	toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
 }
 
-function renderNav() {
-	const box = $("#services");
-	box.replaceChildren(
-		...state.services.map((item) =>
-			h("button", { class: `service${item.name === current ? " active" : ""}`, onclick: () => { current = item.name; openModel = null; notice = null; render(); } },
-				h("span", {}, item.displayName || item.name),
-				h("span", { class: `dot${item.status?.error ? " err" : item.status?.registered ? " on" : ""}`, title: item.status?.error ? "有错误" : item.status?.registered ? "已注册" : "未注册" }),
-			),
-		),
-	);
-}
+const service = () => state.services.find((item) => item.name === current);
+const statusClass = (item) => (item.status?.error ? "err" : item.status?.registered ? "on" : "");
 
 function parseJsonField(text, label) {
 	const trimmed = text.trim();
@@ -153,263 +329,429 @@ function parseJsonField(text, label) {
 	}
 }
 
-function renderServiceForm(item) {
-	const isNew = !item;
-	const form = h("div", { class: "card" });
-	const field = (label, input, hint) => [h("label", {}, label), h("div", {}, input, hint ? h("div", { class: "hint" }, hint) : null)];
-	const name = h("input", { type: "text", value: item?.name ?? "", placeholder: "cpa" });
-	const displayName = h("input", { type: "text", value: item?.displayName ?? "", placeholder: "可选，显示在 pi 的模型列表里" });
-	const baseUrl = h("input", { type: "text", value: item?.baseUrl ?? "", placeholder: "https://example.com" });
-	const defaultApi = h("select", {}, h("option", { value: "" }, "openai-completions（默认）"), ...state.apis.map((value) => h("option", { value }, value)));
-	defaultApi.value = item?.defaultApi ?? "";
-	const apiKeyEnv = h("input", { type: "text", value: item?.apiKeyEnv ?? "", placeholder: "可选，例如 CPA_API_KEY" });
-	const headers = h("textarea", { placeholder: '可选，例如 {"X-Title": "pi"}' });
-	headers.value = item && Object.keys(item.headers).length ? JSON.stringify(item.headers, null, 2) : "";
-
-	form.append(h("div", { class: "grid" },
-		field("名字", name, "pi 里的服务商名，模型写成 名字/模型 id。只能用小写字母、数字、点、下划线和连字符。"),
-		field("显示名", displayName),
-		field("地址", baseUrl, "服务根地址，不带 /v1"),
-		field("默认协议", defaultApi, "其他办法都判断不出协议时使用"),
-		field("密钥环境变量", apiKeyEnv, "设置了这个环境变量时优先用它"),
-		field("请求头", headers, "加在这个服务所有请求上"),
-	));
-
-	const save = h("button", { class: "primary", onclick: async () => {
-		let parsedHeaders;
-		try { parsedHeaders = parseJsonField(headers.value, "请求头"); } catch (error) { notice = { ok: false, text: error.message }; render(); return; }
-		const body = { previousName: item?.name, service: { name: name.value.trim(), displayName: displayName.value, baseUrl: baseUrl.value, defaultApi: defaultApi.value, apiKeyEnv: apiKeyEnv.value, headers: parsedHeaders ?? {} } };
-		const data = await run("saveService", body, "已保存");
-		if (data) {
-			current = body.service.name;
-			render();
-		}
-	} }, isNew ? "添加" : "保存");
-	const actions = h("div", { class: "row", style: "margin-top:12px" }, save);
-	if (!isNew) {
-		actions.append(h("button", { class: "danger", onclick: async () => {
-			if (!confirm(`删除服务 ${item.name}？它的密钥和目录缓存也会删除。`)) return;
-			const data = await run("removeService", { name: item.name }, "已删除");
-			if (data) {
-				current = state.services[0]?.name ?? "";
-				openModel = null;
-				render();
-			}
-		} }, "删除服务"));
-	}
-	form.append(actions);
-	return form;
-}
-
-function renderKey(item) {
-	const status = item.status;
-	const input = h("input", { type: "password", placeholder: status?.keySource ? "已设置，输入新密钥可替换" : "输入密钥", autocomplete: "off" });
-	const text = status?.keySource === "env" ? `已设置（来自环境变量 ${item.apiKeyEnv}，优先于文件里的密钥）` : status?.keySource === "file" ? "已设置（保存在本机文件）" : "未设置";
-	return h("div", { class: "card" },
-		h("div", { class: "row" },
-			h("span", { style: "min-width:140px;color:var(--muted)" }, "密钥"),
-			h("span", { class: status?.keySource ? "" : "warn" }, text),
-		),
-		h("div", { class: "row", style: "margin-top:8px" },
-			h("div", { style: "flex:1;min-width:240px" }, input),
-			h("button", { onclick: async () => { if (!input.value.trim()) return; await run("setKey", { name: item.name, apiKey: input.value }, "密钥已保存"); } }, "保存密钥"),
-			h("button", { class: "danger", disabled: !status?.keySource || status.keySource === "env" ? true : undefined, onclick: async () => {
-				if (confirm("清除文件里保存的密钥？")) await run("setKey", { name: item.name, apiKey: "" }, "密钥已清除");
-			} }, "清除"),
-		),
-		h("div", { class: "hint", style: "margin-top:6px" }, "密钥只写不读，页面不会显示已保存的密钥。"),
-	);
-}
-
-function fmt(n) {
-	return typeof n === "number" ? n.toLocaleString() : "";
-}
-
-function renderModels(item) {
-	const wrap = h("div");
-	const catalogText = item.catalog
-		? `目录 ${item.catalog.size} 个模型，${new Date(item.catalog.fetchedAt).toLocaleString()} 刷新${item.catalog.codex ? "，含 Codex 格式参数" : ""}`
-		: "还没有读取过目录";
-	const search = h("input", { type: "text", value: filter, placeholder: "筛选模型", style: "width:200px", oninput: (event) => { filter = event.target.value; renderTable(); } });
-	wrap.append(h("div", { class: "row", style: "margin-bottom:8px" },
-		h("button", { onclick: () => run("refresh", { name: item.name }, "目录已刷新") }, "刷新目录 / 测试连接"),
-		h("span", { class: "hint" }, catalogText),
-		h("span", { style: "flex:1" }),
-		search,
-		h("label", {}, h("input", { type: "checkbox", checked: onlyEnabled || undefined, onchange: (event) => { onlyEnabled = event.target.checked; renderTable(); } }), " 只看已启用"),
-		h("label", {}, h("input", { type: "checkbox", checked: showHidden || undefined, onchange: (event) => { showHidden = event.target.checked; renderTable(); } }), " 显示隐藏模型"),
-	));
-	const tableBox = h("div");
-	wrap.append(tableBox);
-
-	function renderTable() {
-		const models = item.models.filter((model) =>
-			(!filter || model.id.toLowerCase().includes(filter.toLowerCase()) || model.name.value.toLowerCase().includes(filter.toLowerCase())) &&
-			(!onlyEnabled || model.enabled) &&
-			(showHidden || !model.hidden || model.enabled))
-			.sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id));
-		if (models.length === 0) {
-			tableBox.replaceChildren(h("div", { class: "empty" }, item.models.length ? "没有符合条件的模型" : "目录是空的。设置好密钥后点“刷新目录”。"));
-			return;
-		}
-		const rows = [];
-		for (const model of models) {
-			const needsFix = model.contextWindow.source === "default" || model.maxTokens.source === "default";
-			const row = h("tr", { class: `model${openModel === model.id ? " open" : ""}`, onclick: (event) => {
-				if (event.target.closest("input")) return;
-				openModel = openModel === model.id ? null : model.id;
-				renderTable();
-			} },
-				h("td", {}, h("input", { type: "checkbox", checked: model.enabled || undefined, onchange: (event) => run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }) })),
-				h("td", { class: "id" }, model.id, model.hidden ? h("span", { class: "src" }, "隐藏") : null, model.missing ? h("span", { class: "src default" }, "目录里没有") : null,
-					h("div", { class: "hint" }, model.name.value)),
-				h("td", {}, model.ownedBy ?? ""),
-				h("td", {}, model.api.value, src(model.api.source, model.api.source === "default" ? API_SOURCE_DEFAULT : undefined)),
-				h("td", {}, fmt(model.contextWindow.value), src(model.contextWindow.source)),
-				h("td", {}, fmt(model.maxTokens.value), src(model.maxTokens.source)),
-				h("td", {}, model.levels.length ? model.levels.join(", ") : "不支持调节", src(model.thinkingLevelMap.source)),
-				h("td", {}, needsFix ? h("span", { class: "warn" }, "缺参数，请补齐") : model.builtin ? h("span", { class: "hint" }, model.builtin) : ""),
-			);
-			rows.push(row);
-			if (openModel === model.id) rows.push(h("tr", { class: "detail" }, h("td", { colspan: 8 }, renderOverride(item, model))));
-		}
-		tableBox.replaceChildren(h("table", {},
-			h("thead", {}, h("tr", {}, ...["启用", "模型", "owned_by", "协议", "上下文", "最大输出", "思考档位", "pi 自带目录"].map((title) => h("th", {}, title)))),
-			h("tbody", {}, rows),
-		));
-	}
-	renderTable();
-	return wrap;
-}
-
-function renderOverride(item, model) {
-	const o = model.override;
-	const box = h("div");
-	const rows = [];
-	const add = (label, input, current) => rows.push(h("label", {}, label), input, h("div", { class: "hint" }, current));
-	const now = (value, source) => h("span", {}, "当前：", value === undefined || value === "" ? "无" : String(value), src(source));
-
-	const name = h("input", { type: "text", value: o.name ?? "", placeholder: model.name.value });
-	add("名称", name, now(model.name.value, model.name.source));
-	const apiSelect = h("select", {}, h("option", { value: "" }, "自动"), ...state.apis.map((value) => h("option", { value }, value)));
-	apiSelect.value = o.api ?? "";
-	add("协议", apiSelect, now(model.api.value, model.api.source));
-	const baseUrl = h("input", { type: "text", value: o.baseUrl ?? "", placeholder: "自动：按协议拼接" });
-	add("地址", baseUrl, now(model.baseUrl.value, model.baseUrl.source === "default" ? "default" : "manual"));
-	const ctx = h("input", { type: "number", value: o.contextWindow ?? "", placeholder: String(model.contextWindow.value) });
-	add("上下文", ctx, now(fmt(model.contextWindow.value), model.contextWindow.source));
-	const max = h("input", { type: "number", value: o.maxTokens ?? "", placeholder: String(model.maxTokens.value) });
-	add("最大输出", max, now(fmt(model.maxTokens.value), model.maxTokens.source));
-	const input = h("select", {}, h("option", { value: "" }, "自动"), h("option", { value: "text" }, "仅文本"), h("option", { value: "text,image" }, "文本和图片"));
-	input.value = o.input ? o.input.join(",") : "";
-	add("输入", input, now(model.input.value.join(", "), model.input.source));
-	// 空数组表示不支持调节思考，回显为 none，再次保存时不会丢失。
-	const levelsText = o.thinkingLevels ? (o.thinkingLevels.length ? o.thinkingLevels.join(", ") : "none") : "";
-	const levels = h("input", { type: "text", value: levelsText, placeholder: "自动。例如 low, medium, high；只填 none 表示不支持，和其他档位一起写 none 或 off 表示可以关闭思考" });
-	add("思考档位", levels, now(model.levels.length ? model.levels.join(", ") : "不支持调节", model.thinkingLevelMap.source));
-	const headers = h("textarea", { placeholder: '例如 {"anthropic-beta": "context-1m-2025-08-07"}' });
-	headers.value = o.headers ? JSON.stringify(o.headers, null, 2) : "";
-	add("请求头", headers, model.headers ? h("span", {}, "当前：", JSON.stringify(model.headers)) : "当前：无");
-	const compat = h("textarea", { placeholder: "自动：按原厂从 pi 自带目录抄" });
-	compat.value = o.compat ? JSON.stringify(o.compat, null, 2) : "";
-	add("compat", compat, h("span", {}, "当前：", model.compat.value ? JSON.stringify(model.compat.value) : "无", src(model.compat.source)));
-	const cost = h("textarea", { placeholder: '每百万 token 的美元价格，例如 {"input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 0}' });
-	cost.value = o.cost ? JSON.stringify(o.cost, null, 2) : "";
-	add("价格", cost, h("span", {}, "当前：", JSON.stringify(model.cost.value), src(model.cost.source)));
-
-	box.append(h("div", { class: "grid" }, rows));
-	const result = h("div");
-	const testButton = h("button", { onclick: async () => {
-		testButton.disabled = true;
-		testButton.textContent = "测试中…";
-		try {
-			const data = await api("testModel", { name: item.name, id: model.id });
-			const test = data.test;
-			result.replaceChildren(h("div", { class: `msg ${test.ok ? "ok" : "err"}` },
-				`${test.ok ? "成功" : "失败"}（${test.request.api} ${test.request.baseUrl}，${(test.durationMs / 1000).toFixed(1)} 秒，stopReason: ${test.stopReason}）\n`,
-				test.ok ? `回复：${test.text}` : test.error || "没有返回错误信息"));
-		} catch (error) {
-			result.replaceChildren(h("div", { class: "msg err" }, error.message));
-		} finally {
-			testButton.disabled = false;
-			testButton.textContent = "发送测试消息";
-		}
-	} }, "发送测试消息");
-
-	box.append(h("div", { class: "row", style: "margin-top:12px" },
-		h("button", { class: "primary", onclick: async () => {
-			let override;
-			try {
-				override = {};
-				if (name.value.trim()) override.name = name.value.trim();
-				if (apiSelect.value) override.api = apiSelect.value;
-				if (baseUrl.value.trim()) override.baseUrl = baseUrl.value.trim().replace(/\/+$/, "");
-				if (ctx.value) override.contextWindow = positiveInt(ctx.value, "上下文");
-				if (max.value) override.maxTokens = positiveInt(max.value, "最大输出");
-				if (input.value) override.input = input.value.split(",");
-				if (levels.value.trim()) {
-					const list = levels.value.split(/[\s,，]+/).map((level) => level.trim().toLowerCase()).filter(Boolean);
-					override.thinkingLevels = list.length === 1 && list[0] === "none" ? [] : list;
-				}
-				const parsedHeaders = parseJsonField(headers.value, "请求头");
-				if (parsedHeaders) override.headers = parsedHeaders;
-				const parsedCompat = parseJsonField(compat.value, "compat");
-				if (parsedCompat) override.compat = parsedCompat;
-				const parsedCost = parseJsonField(cost.value, "价格");
-				if (parsedCost) override.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...parsedCost };
-			} catch (error) {
-				notice = { ok: false, text: error.message };
-				render();
-				return;
-			}
-			await run("setOverride", { name: item.name, id: model.id, override }, "手动设置已保存");
-		} }, "保存手动设置"),
-		h("button", { disabled: Object.keys(o).length ? undefined : true, onclick: () => run("setOverride", { name: item.name, id: model.id }, "已清除手动设置") }, "清除手动设置"),
-		testButton,
-		h("span", { class: "hint" }, "留空的项自动取值。测试消息用当前生效的参数发送。"),
-	));
-	box.append(result);
-	return box;
-}
-
 function positiveInt(text, label) {
 	const value = Number(text);
 	if (!Number.isInteger(value) || value <= 0) throw new Error(`${label} 要填正整数`);
 	return value;
 }
 
+function select(item) {
+	current = item;
+	tab = "models";
+	openModel = null;
+	error = null;
+	render();
+}
+
+function renderNav() {
+	$("#services").replaceChildren(
+		...state.services.map((item) =>
+			h("button", { class: `svc${item.name === current ? " active" : ""}`, onclick: () => select(item.name) },
+				h("span", { class: `status ${statusClass(item)}` }),
+				h("span", { class: "meta" },
+					h("div", { class: "title" }, item.displayName || item.name),
+					h("div", { class: "sub" }, `${item.models.filter((model) => model.enabled).length} 个已启用`),
+				),
+			),
+		),
+	);
+}
+
+/* ---------- 服务标题 ---------- */
+
+function renderHead(item) {
+	const status = item.status;
+	const pill = status?.error ? h("span", { class: "pill err" }, "有错误") : status?.registered ? h("span", { class: "pill on" }, "已注册到 pi") : h("span", { class: "pill" }, "未注册");
+	const key = status?.keySource === "env" ? `密钥来自环境变量 ${item.apiKeyEnv}` : status?.keySource === "file" ? "密钥已设置" : "未设置密钥";
+	const catalog = item.catalog ? `目录 ${item.catalog.size} 个模型 · ${new Date(item.catalog.fetchedAt).toLocaleString()} 刷新` : "还没有读取过目录";
+	const refresh = h("button", { class: "btn", onclick: async () => {
+		refresh.disabled = true;
+		refresh.textContent = "刷新中…";
+		await run("refresh", { name: item.name }, "目录已刷新");
+	} }, "刷新目录");
+	return h("div", { class: "head" },
+		h("div", { class: "info" },
+			h("h1", {}, item.displayName || item.name, pill),
+			h("div", { class: "facts" },
+				h("span", { class: "mono" }, item.baseUrl),
+				h("span", {}, `服务名 ${item.name}`),
+				h("span", { class: status?.keySource ? "" : "warn" }, key),
+				h("span", {}, catalog),
+			),
+		),
+		refresh,
+	);
+}
+
+/* ---------- 模型列表 ---------- */
+
+function matches(model) {
+	const text = view.text.trim().toLowerCase();
+	if (text && !model.id.toLowerCase().includes(text) && !model.name.value.toLowerCase().includes(text)) return false;
+	if (view.api && model.api.value !== view.api) return false;
+	if (view.owner && (model.ownedBy ?? "") !== view.owner) return false;
+	if (!view.hidden && model.hidden && !model.enabled) return false;
+	return true;
+}
+
+function renderModels(item) {
+	const wrap = h("div");
+	const options = (values, all) => [h("option", { value: "" }, all), ...[...new Set(values)].sort().map((value) => h("option", { value }, value || "（空）"))];
+	const apiFilter = h("select", { class: "input", onchange: (event) => { view.api = event.target.value; renderTable(); } }, options(item.models.map((model) => model.api.value), "全部协议"));
+	apiFilter.value = view.api;
+	const ownerFilter = h("select", { class: "input", onchange: (event) => { view.owner = event.target.value; renderTable(); } }, options(item.models.map((model) => model.ownedBy ?? ""), "全部 owned_by"));
+	ownerFilter.value = view.owner;
+	const search = h("input", { class: "input", type: "search", value: view.text, placeholder: "搜索模型 id 或名称", oninput: (event) => { view.text = event.target.value; renderTable(); } });
+	const count = h("span", { class: "hint", style: "margin:0" });
+	const chips = h("div", { class: "chips" });
+	wrap.append(h("div", { class: "toolbar" },
+		h("div", { class: "search" }, h("span", { html: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>' }), search),
+		apiFilter, ownerFilter,
+		h("label", { class: "check" }, h("input", { type: "checkbox", checked: view.hidden || undefined, onchange: (event) => { view.hidden = event.target.checked; renderTable(); } }), "显示隐藏模型"),
+		h("span", { class: "spacer" }),
+		count,
+	));
+	const box = h("div");
+	wrap.append(chips, box, h("div", { class: "legend" },
+		h("span", {}, "参数来源："), ...["server", "pi", "manual", "default"].map((source) => h("span", {}, dot(source), SOURCE[source])),
+		h("span", { class: "spacer" }), h("span", {}, "点击查看详情和手动设置"),
+	));
+
+
+	function renderChips(models) {
+		const counts = new Map();
+		for (const model of models) counts.set(prefixOf(model.id), (counts.get(prefixOf(model.id)) ?? 0) + 1);
+		const chip = (value, label, n) => h("button", { class: `chip${view.prefix === value ? " active" : ""}`, onclick: () => {
+			if (value === ENABLED) pinned.set(item.name, new Set(item.models.filter((model) => model.enabled).map((model) => model.id)));
+			view.prefix = value;
+			renderTable();
+		} }, label, h("span", { class: "n" }, n));
+		chips.replaceChildren(
+			chip("", "全部", models.length),
+			chip(ENABLED, "已启用", models.filter((model) => model.enabled).length),
+			...[...counts].sort(([a], [b]) => a.localeCompare(b)).map(([prefix, n]) => chip(prefix, prefix, n)),
+		);
+	}
+
+	function renderTable() {
+		// 前缀按钮上的数量按其他筛选条件计算，不受当前所选前缀影响。
+		const filtered = item.models.filter(matches);
+		renderChips(filtered);
+		if (view.prefix === ENABLED && !pinned.has(item.name)) pinned.set(item.name, new Set(item.models.filter((model) => model.enabled).map((model) => model.id)));
+		const models = filtered.filter((model) =>
+			!view.prefix || (view.prefix === ENABLED ? pinned.get(item.name).has(model.id) : prefixOf(model.id) === view.prefix));
+		count.textContent = `显示 ${models.length} / ${item.models.length}`;
+		if (models.length === 0) {
+			const empty = !item.models.length ? "目录是空的。设置好密钥后点“刷新目录”。" : view.prefix === ENABLED ? "还没有启用模型" : "没有符合条件的模型";
+			box.replaceChildren(h("div", { class: "table-wrap" }, h("div", { class: "empty" }, empty)));
+			return;
+		}
+		const groups = new Map();
+		for (const model of models) {
+			const prefix = prefixOf(model.id);
+			if (!groups.has(prefix)) groups.set(prefix, []);
+			groups.get(prefix).push(model);
+		}
+		const cards = [];
+		const section = (key, title, list, summary) => {
+			const rows = [];
+			cards.push(rows);
+			const closed = collapsed.has(key);
+			rows.push(h("tr", { class: `group${closed ? " collapsed" : ""}`, onclick: () => {
+				if (closed) collapsed.delete(key);
+				else collapsed.add(key);
+				renderTable();
+			} }, h("td", { colspan: 7 }, h("span", { class: "caret", html: CARET }), h("b", {}, title), summary)));
+			if (!closed) rows.push(...list.map((model) => modelRow(item, model)));
+		};
+		for (const [prefix, list] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+			list.sort(newestFirst);
+			const enabled = list.filter((model) => model.enabled).length;
+			section(prefix, prefix, list, `${list.length} 个${enabled ? `，已启用 ${enabled}` : ""}`);
+		}
+		// 每个分组单独放一张表，彼此隔开。各表列宽相同，表头只放在第一张上。
+		const table = (body, withHead) => h("div", { class: "table-wrap" }, h("table", {},
+			h("colgroup", {}, ...["58px", "", "176px", "88px", "88px", "220px", "100px"].map((width) => h("col", width ? { style: `width:${width}` } : {}))),
+			withHead ? h("thead", {}, h("tr", {}, ...["", "模型", "协议", "上下文", "最大输出", "思考档位", "owned_by"].map((title) => h("th", {}, title)))) : null,
+			h("tbody", {}, body),
+		));
+		box.replaceChildren(...cards.map((body, index) => table(body, index === 0)));
+	}
+	renderTable();
+	return wrap;
+}
+
+function modelRow(item, model) {
+	const needsFix = model.contextWindow.source === "default" || model.maxTokens.source === "default";
+	return h("tr", { class: openModel === model.id ? "open" : "", onclick: (event) => {
+		if (event.target.closest("input")) return;
+		openModel = model.id;
+		renderDrawer();
+		render();
+	} },
+		h("td", { class: "toggle" }, h("input", { type: "checkbox", class: "switch", title: model.enabled ? "已启用" : "未启用", checked: model.enabled || undefined, onchange: (event) => run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }) })),
+		h("td", { title: `${model.id}\n${model.name.value}` },
+			h("div", { class: "model-id" }, model.id,
+				model.hidden ? h("span", { class: "tag" }, "隐藏") : null,
+				model.missing ? h("span", { class: "tag warn" }, "目录里没有") : null,
+				needsFix ? h("span", { class: "tag warn" }, "缺参数") : null,
+				Object.keys(model.override).length ? h("span", { class: "tag accent" }, "手动") : null),
+			model.name.value !== model.id ? h("div", { class: "model-name" }, model.name.value) : null),
+		h("td", { title: `协议来源：${SOURCE[model.api.source] ?? model.api.source}` }, h("span", { class: "api" }, model.api.value)),
+		h("td", { title: `${full(model.contextWindow.value)}（${SOURCE[model.contextWindow.source]}）` }, h("span", { class: "val num" }, h("span", {}, short(model.contextWindow.value)), dot(model.contextWindow.source))),
+		h("td", { title: `${full(model.maxTokens.value)}（${SOURCE[model.maxTokens.source]}）` }, h("span", { class: "val num" }, h("span", {}, short(model.maxTokens.value)), dot(model.maxTokens.source))),
+		h("td", { title: SOURCE[model.thinkingLevelMap.source] }, h("span", { class: "val" }, h("span", { class: "levels" }, model.levels.length ? model.levels.join(" · ") : "不支持调节"), dot(model.thinkingLevelMap.source))),
+		h("td", { class: "levels" }, model.ownedBy ?? ""),
+	);
+}
+
+/* ---------- 模型详情 ---------- */
+
+function renderDrawer() {
+	const root = $("#drawer");
+	const item = service();
+	const model = item?.models.find((entry) => entry.id === openModel);
+	if (!model) {
+		root.replaceChildren();
+		return;
+	}
+	const close = () => { openModel = null; renderDrawer(); render(); };
+	root.replaceChildren(
+		h("div", { class: "scrim", onclick: close }),
+		h("div", { class: "drawer" },
+			h("div", { class: "drawer-head" },
+				h("input", { type: "checkbox", class: "switch", style: "margin-top:4px", title: "启用", checked: model.enabled || undefined, onchange: (event) => run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }) }),
+				h("div", { class: "grow" }, h("div", { class: "model-id" }, model.id), h("div", { class: "model-name" }, model.name.value)),
+				h("button", { class: "close", title: "关闭", onclick: close }, "×"),
+			),
+			...overrideForm(item, model),
+		),
+	);
+}
+
+function overrideForm(item, model) {
+	const o = model.override;
+	const effective = h("dl", { class: "kv" });
+	const fact = (label, ...value) => effective.append(h("dt", {}, label), h("dd", {}, ...value));
+	fact("协议", h("span", { class: "api" }, model.api.value), srcText(model.api.source));
+	fact("地址", h("span", { class: "mono", style: "font-size:12px" }, model.baseUrl.value), model.baseUrl.source === "manual" ? srcText("manual") : null);
+	fact("上下文", h("span", { class: "num" }, full(model.contextWindow.value)), srcText(model.contextWindow.source));
+	fact("最大输出", h("span", { class: "num" }, full(model.maxTokens.value)), srcText(model.maxTokens.source));
+	fact("输入", model.input.value.join(", "), srcText(model.input.source));
+	fact("思考档位", model.levels.length ? model.levels.join(", ") : "不支持调节", srcText(model.thinkingLevelMap.source));
+	if (model.betas.length) {
+		fact("附加 beta", h("span", { class: "mono", style: "font-size:12px" }, model.betas.join(", ")),
+			model.betas.includes(LONG_CONTEXT_BETA) ? h("span", { class: "srctext" }, "上下文超过 200K 时自动申请 1M") : null);
+	}
+	if (model.headers) fact("请求头", h("span", { class: "mono", style: "font-size:12px" }, JSON.stringify(model.headers)));
+	const compatTags = Object.entries(model.compat.value ?? {}).map(([key, value]) => h("span", { class: "tag mono", style: "margin:0" }, value === true ? key : `${key}: ${JSON.stringify(value)}`));
+	fact("compat", ...(compatTags.length ? compatTags : ["无"]), srcText(model.compat.source));
+	const price = model.cost.value;
+	fact("价格", h("span", { class: "num" }, `输入 $${price.input} · 输出 $${price.output} · 缓存读 $${price.cacheRead} · 缓存写 $${price.cacheWrite}（每百万 token）`), srcText(model.cost.source));
+	if (model.builtin) fact("pi 自带目录", h("span", { class: "mono", style: "font-size:12px" }, model.builtin));
+
+	const form = h("div", { class: "form" });
+	const field = (label, input, hint) => form.append(h("label", {}, label), h("div", {}, input, hint ? h("div", { class: "hint" }, hint) : null));
+	const name = h("input", { class: "input", type: "text", value: o.name ?? "", placeholder: model.name.value });
+	field("名称", name);
+	const apiSelect = h("select", { class: "input" }, h("option", { value: "" }, `自动（${model.api.value}）`), ...state.apis.map((value) => h("option", { value }, value)));
+	apiSelect.value = o.api ?? "";
+	field("协议", apiSelect);
+	const baseUrl = h("input", { class: "input", type: "text", value: o.baseUrl ?? "", placeholder: "自动：按协议拼接" });
+	field("地址", baseUrl);
+	const ctx = h("input", { class: "input", type: "number", value: o.contextWindow ?? "", placeholder: String(model.contextWindow.value) });
+	field("上下文", ctx, model.api.value === "anthropic-messages" ? "超过 200000 时自动带上 context-1m beta；不想要就填 200000" : null);
+	const max = h("input", { class: "input", type: "number", value: o.maxTokens ?? "", placeholder: String(model.maxTokens.value) });
+	field("最大输出", max);
+	const input = h("select", { class: "input" }, h("option", { value: "" }, "自动"), h("option", { value: "text" }, "仅文本"), h("option", { value: "text,image" }, "文本和图片"));
+	input.value = o.input ? o.input.join(",") : "";
+	field("输入", input);
+	// 空数组表示不支持调节思考，回显为 none，再次保存时不会丢失。
+	const levelsText = o.thinkingLevels ? (o.thinkingLevels.length ? o.thinkingLevels.join(", ") : "none") : "";
+	const levels = h("input", { class: "input", type: "text", value: levelsText, placeholder: "自动，例如 low, medium, high" });
+	field("思考档位", levels, "只填 none 表示不支持调节；和其他档位一起写 none 或 off 表示可以关闭思考");
+	const headers = h("textarea", { class: "input", placeholder: '例如 {"X-Title": "pi"}' });
+	headers.value = o.headers ? JSON.stringify(o.headers, null, 2) : "";
+	field("请求头", headers, "Anthropic 协议的 anthropic-beta 会追加到 pi 自己的 beta 列表里");
+	const compat = h("textarea", { class: "input", placeholder: "自动：按原厂从 pi 自带目录抄" });
+	compat.value = o.compat ? JSON.stringify(o.compat, null, 2) : "";
+	field("compat", compat);
+	const cost = h("textarea", { class: "input", placeholder: '每百万 token 的美元价格，例如 {"input": 2, "output": 10}' });
+	cost.value = o.cost ? JSON.stringify(o.cost, null, 2) : "";
+	field("价格", cost);
+
+	const result = h("div");
+	const testButton = h("button", { class: "btn", onclick: async () => {
+		testButton.disabled = true;
+		testButton.textContent = "测试中…";
+		try {
+			const data = await api("testModel", { name: item.name, id: model.id });
+			const test = data.test;
+			result.replaceChildren(h("div", { class: `result ${test.ok ? "ok" : "err"}` },
+				`${test.ok ? "成功" : "失败"} · ${test.request.api} ${test.request.baseUrl} · ${(test.durationMs / 1000).toFixed(1)} 秒 · stopReason: ${test.stopReason}\n`,
+				test.ok ? `回复：${test.text}` : test.error || "没有返回错误信息"));
+		} catch (failure) {
+			result.replaceChildren(h("div", { class: "result err" }, failure.message));
+		} finally {
+			testButton.disabled = false;
+			testButton.textContent = "发送测试消息";
+		}
+	} }, "发送测试消息");
+
+	const save = async () => {
+		let override;
+		try {
+			override = {};
+			if (name.value.trim()) override.name = name.value.trim();
+			if (apiSelect.value) override.api = apiSelect.value;
+			if (baseUrl.value.trim()) override.baseUrl = baseUrl.value.trim().replace(/\/+$/, "");
+			if (ctx.value) override.contextWindow = positiveInt(ctx.value, "上下文");
+			if (max.value) override.maxTokens = positiveInt(max.value, "最大输出");
+			if (input.value) override.input = input.value.split(",");
+			if (levels.value.trim()) {
+				const list = levels.value.split(/[\s,，]+/).map((level) => level.trim().toLowerCase()).filter(Boolean);
+				override.thinkingLevels = list.length === 1 && list[0] === "none" ? [] : list;
+			}
+			const parsedHeaders = parseJsonField(headers.value, "请求头");
+			if (parsedHeaders) override.headers = parsedHeaders;
+			const parsedCompat = parseJsonField(compat.value, "compat");
+			if (parsedCompat) override.compat = parsedCompat;
+			const parsedCost = parseJsonField(cost.value, "价格");
+			if (parsedCost) override.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...parsedCost };
+		} catch (failure) {
+			result.replaceChildren(h("div", { class: "result err" }, failure.message));
+			return;
+		}
+		if (await run("setOverride", { name: item.name, id: model.id, override }, "手动设置已保存")) renderDrawer();
+	};
+
+	return [
+		h("div", { class: "drawer-body" },
+			h("div", { class: "section-title" }, "生效的参数"),
+			effective,
+			h("div", { class: "section-title" }, "手动设置 · 留空的项自动取值"),
+			form,
+			result,
+		),
+		h("div", { class: "drawer-foot" },
+			h("button", { class: "btn primary", onclick: save }, "保存"),
+			h("button", { class: "btn", disabled: Object.keys(o).length ? undefined : true, onclick: async () => {
+				if (await run("setOverride", { name: item.name, id: model.id }, "已清除手动设置")) renderDrawer();
+			} }, "清除手动设置"),
+			h("span", { class: "spacer" }),
+			testButton,
+		),
+	];
+}
+
+/* ---------- 服务设置 ---------- */
+
+function renderServiceForm(item) {
+	const isNew = !item;
+	const card = h("div", { class: "card" }, h("h3", {}, isNew ? "添加服务" : "服务"));
+	const form = h("div", { class: "form" });
+	const field = (label, input, hint) => form.append(h("label", {}, label), h("div", {}, input, hint ? h("div", { class: "hint" }, hint) : null));
+	const name = h("input", { class: "input", type: "text", value: item?.name ?? "", placeholder: "cpa" });
+	const displayName = h("input", { class: "input", type: "text", value: item?.displayName ?? "", placeholder: "可选，显示在 pi 的模型列表里" });
+	const baseUrl = h("input", { class: "input", type: "text", value: item?.baseUrl ?? "", placeholder: "https://example.com" });
+	const defaultApi = h("select", { class: "input" }, h("option", { value: "" }, "openai-completions（默认）"), ...state.apis.map((value) => h("option", { value }, value)));
+	defaultApi.value = item?.defaultApi ?? "";
+	const apiKeyEnv = h("input", { class: "input", type: "text", value: item?.apiKeyEnv ?? "", placeholder: "可选，例如 CPA_API_KEY" });
+	const headers = h("textarea", { class: "input", placeholder: '可选，例如 {"X-Title": "pi"}' });
+	headers.value = item && Object.keys(item.headers).length ? JSON.stringify(item.headers, null, 2) : "";
+	field("名字", name, "pi 里的服务商名，模型写成 名字/模型 id。只能用小写字母、数字、点、下划线和连字符。");
+	field("显示名", displayName);
+	field("地址", baseUrl, "服务根地址，不带 /v1");
+	field("默认协议", defaultApi, "其他办法都判断不出协议时使用");
+	field("密钥环境变量", apiKeyEnv, "设置了这个环境变量时优先用它");
+	field("请求头", headers, "加在这个服务所有请求上，按原样发送。Anthropic 协议的 anthropic-beta 会追加到 pi 自己的 beta 列表里");
+	card.append(form, h("div", { class: "actions" },
+		h("button", { class: "btn primary", onclick: async () => {
+			let parsedHeaders;
+			try { parsedHeaders = parseJsonField(headers.value, "请求头"); } catch (failure) { error = failure.message; render(); return; }
+			const body = { previousName: item?.name, service: { name: name.value.trim(), displayName: displayName.value, baseUrl: baseUrl.value, defaultApi: defaultApi.value, apiKeyEnv: apiKeyEnv.value, headers: parsedHeaders ?? {} } };
+			if (await run("saveService", body, isNew ? "已添加" : "已保存")) {
+				current = body.service.name;
+				if (isNew) tab = "settings";
+				render();
+			}
+		} }, isNew ? "添加" : "保存"),
+	));
+	return card;
+}
+
+function renderKey(item) {
+	const status = item.status;
+	const input = h("input", { class: "input", type: "password", placeholder: status?.keySource ? "已设置，输入新密钥可替换" : "输入密钥", autocomplete: "off" });
+	const text = status?.keySource === "env" ? `已设置，来自环境变量 ${item.apiKeyEnv}，优先于文件里的密钥` : status?.keySource === "file" ? "已设置，保存在本机文件" : "未设置";
+	return h("div", { class: "card" },
+		h("h3", {}, "密钥 ", h("span", { class: `pill ${status?.keySource ? "on" : "warn"}`, style: "margin-left:6px" }, text)),
+		h("div", { class: "key-row" },
+			input,
+			h("button", { class: "btn", onclick: async () => { if (input.value.trim()) await run("setKey", { name: item.name, apiKey: input.value }, "密钥已保存"); } }, "保存密钥"),
+			h("button", { class: "btn danger", disabled: !status?.keySource || status.keySource === "env" ? true : undefined, onclick: async () => {
+				if (confirm("清除文件里保存的密钥？")) await run("setKey", { name: item.name, apiKey: "" }, "密钥已清除");
+			} }, "清除"),
+		),
+		h("div", { class: "hint" }, "密钥只写不读，页面不会显示已保存的密钥。"),
+	);
+}
+
+function renderDanger(item) {
+	return h("div", { class: "card danger" },
+		h("h3", {}, "删除服务"),
+		h("div", { class: "hint", style: "margin:0 0 12px" }, "服务的密钥和目录缓存会一起删除。"),
+		h("button", { class: "btn danger", onclick: async () => {
+			if (!confirm(`删除服务 ${item.name}？它的密钥和目录缓存也会删除。`)) return;
+			if (await run("removeService", { name: item.name }, "已删除")) {
+				current = state.services[0]?.name ?? "";
+				openModel = null;
+				render();
+			}
+		} }, "删除服务"),
+	);
+}
+
+/* ---------- 整页 ---------- */
+
 function render() {
 	renderNav();
 	const content = $("#content");
 	const item = service();
 	const parts = [];
-	if (state.loadError) parts.push(h("div", { class: "msg err", style: "margin:0 0 12px" }, `读取配置失败：${state.loadError}。修好文件后在 pi 里运行 /reload。`));
-	if (notice) parts.push(h("div", { class: `msg ${notice.ok ? "ok" : "err"}`, style: "margin:0 0 12px" }, notice.text));
+	if (state.loadError) parts.push(h("div", { class: "banner err" }, `读取配置失败：${state.loadError}。修好文件后在 pi 里运行 /reload。`));
+	if (error) parts.push(h("div", { class: "banner err" }, h("span", { class: "grow" }, error), h("button", { class: "close", style: "color:inherit", onclick: () => { error = null; render(); } }, "×")));
 	if (current === "" || (!item && state.services.length === 0)) {
-		parts.push(h("h2", {}, "添加服务"), renderServiceForm(undefined));
-		if (state.services.length === 0) parts.push(h("p", { class: "hint" }, "添加后再设置密钥、刷新目录、勾选要启用的模型。"));
+		parts.push(h("div", { class: "head" }, h("div", { class: "info" }, h("h1", {}, "添加服务"),
+			h("div", { class: "facts" }, "添加后再设置密钥、刷新目录、勾选要启用的模型。"))), renderServiceForm(undefined));
 	} else if (item) {
-		parts.push(
-			h("h2", {}, item.displayName || item.name),
-			renderServiceForm(item),
-			h("h2", {}, "密钥"),
-			renderKey(item),
-			h("h2", {}, "模型"),
-			renderModels(item),
-		);
-		if (item.status?.error) parts.splice(notice ? 1 : 0, 0, h("div", { class: "msg err", style: "margin:0 0 12px" }, `错误：${item.status.error}`));
+		parts.push(renderHead(item));
+		if (item.status?.error) parts.push(h("div", { class: "banner err" }, `错误：${item.status.error}`));
+		if (!item.status?.keySource) {
+			parts.push(h("div", { class: "banner warn" }, h("span", { class: "grow" }, "还没有设置密钥，模型不会注册到 pi。"),
+				h("button", { class: "btn small", onclick: () => { tab = "settings"; render(); } }, "去设置")));
+		}
+		parts.push(h("div", { class: "tabs" },
+			h("button", { class: `tab${tab === "models" ? " active" : ""}`, onclick: () => { tab = "models"; render(); } }, "模型", h("span", { class: "count" }, item.models.length)),
+			h("button", { class: `tab${tab === "settings" ? " active" : ""}`, onclick: () => { tab = "settings"; openModel = null; renderDrawer(); render(); } }, "服务设置"),
+		));
+		if (tab === "models") parts.push(renderModels(item));
+		else parts.push(renderKey(item), renderServiceForm(item), renderDanger(item));
 	}
 	content.replaceChildren(...parts);
 }
 
-$("#add").addEventListener("click", () => { current = ""; openModel = null; notice = null; render(); });
+$("#add").addEventListener("click", () => { current = ""; openModel = null; error = null; renderDrawer(); render(); });
+document.addEventListener("keydown", (event) => {
+	if (event.key === "Escape" && openModel) { openModel = null; renderDrawer(); render(); }
+});
 
 api("state").then((data) => {
 	state = data;
 	current = state.services[0]?.name ?? "";
 	render();
-}).catch((error) => {
-	$("#content").replaceChildren(h("div", { class: "msg err" }, `${error.message}。请在 pi 里重新运行 /endpoints。`));
+}).catch((failure) => {
+	$("#content").replaceChildren(h("div", { class: "banner err" }, `${failure.message}。请在 pi 里重新运行 /endpoints。`));
 });
 </script>
 </body>

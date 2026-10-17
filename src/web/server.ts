@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { withBetas } from "../betas.ts";
 import type { ModelOverride, ServiceConfig } from "../config.ts";
 import { describeError, type Endpoints } from "../endpoints.ts";
 import { type ResolvedModel, SUPPORTED_APIS, supportedLevels, toProviderModel } from "../resolve.ts";
@@ -178,7 +179,7 @@ async function testModel(endpoints: Endpoints, name: string, id: string) {
 	const message = await completeSimple(
 		model,
 		{ messages: [{ role: "user", content: "Reply with exactly: OK", timestamp: Date.now() }] },
-		{ apiKey, signal: AbortSignal.timeout(TEST_TIMEOUT_MS) },
+		withBetas({ apiKey, signal: AbortSignal.timeout(TEST_TIMEOUT_MS) }, resolved.betas),
 	);
 	const text = message.content
 		.filter((block) => block.type === "text")
