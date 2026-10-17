@@ -40,25 +40,44 @@ type ChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
 
 export const PI_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
+/** 管理页可选、手动设置允许的协议。 */
+export const SUPPORTED_APIS: Api[] = [
+	"openai-completions",
+	"openai-responses",
+	"anthropic-messages",
+	"google-generative-ai",
+	"mistral-conversations",
+];
+
 const DEFAULTS = { contextWindow: 128000, maxTokens: 16384 };
 const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 /**
- * 服务端列出的档位照原样映射，没列出的设为 null。`off` 只在服务端列出 `none` 或 `off` 时开放；
- * `ultra` 这类 pi 没有的档位丢弃。
+ * 服务端列出的档位照原样映射，没列出的设为 null。`off` 只在服务端列出 `none` 或 `off` 时开放，
+ * 值沿用服务端的写法；`ultra` 这类 pi 没有的档位丢弃。再按协议去掉 pi 发不出去的档位。
  */
-export function levelsToMap(levels: string[]): ThinkingLevelMap {
+export function levelsToMap(levels: string[], api?: Api): ThinkingLevelMap {
 	const offered = new Set(levels.map((level) => level.toLowerCase()));
 	const map: ThinkingLevelMap = {};
 	for (const level of PI_LEVELS) {
-		// 各协议关闭思考时都认 "none"（OpenAI 的 effort 值），其他协议不看具体值。
-		if (level === "off") map.off = offered.has("none") || offered.has("off") ? "none" : null;
+		if (level === "off") map.off = offered.has("none") ? "none" : offered.has("off") ? "off" : null;
 		else map[level] = offered.has(level) ? level : null;
 	}
+	// pi 的 Google 实现只接受 minimal 到 high；Anthropic 实现会把 minimal 原样当作 effort 发出，服务端不认。
+	if (api === "google-generative-ai") map.xhigh = map.max = null;
+	if (api === "anthropic-messages") map.minimal = null;
 	return map;
 }
 
-/** 列出 pi 里可选的思考档位，和 pi 的 getSupportedThinkingLevels 规则一致。 */
+/** 有 off 以外的可选档位才算支持调节思考。 */
+function hasThinking(map: ThinkingLevelMap): boolean {
+	return supportedLevels(true, map).some((level) => level !== "off");
+}
+
+/**
+ * 列出 pi 里可调的思考档位，规则和 pi 的 getSupportedThinkingLevels 一致。
+ * 不支持思考时 pi 返回 ["off"]，这里返回空数组，方便显示"不支持调节"。
+ */
 export function supportedLevels(reasoning: boolean, map: ThinkingLevelMap | undefined): string[] {
 	if (!reasoning) return [];
 	return PI_LEVELS.filter((level) => {
@@ -103,7 +122,7 @@ export function selectApi(model: CatalogModel, service: ServiceConfig, override?
 	return { value: service.defaultApi ?? DEFAULT_API, source: "default" };
 }
 
-/** openai-codex-responses 和 openai-responses 用同一套 compat。 */
+/** openai-codex-responses、azure-openai-responses 和 openai-responses 用同一套 compat。 */
 function compatFamily(api: Api): Api {
 	return api === "openai-codex-responses" || api === "azure-openai-responses" ? "openai-responses" : api;
 }
@@ -138,20 +157,29 @@ function compatSource(vendor: Vendor | undefined, model: CatalogModel, catalog: 
 	return findBuiltinIn(vendor, model.id);
 }
 
+/**
+ * 手动填写的档位用 pi 的档位名。`off` 写成 `none`，和 OpenAI 关闭思考时的 effort 值一致；
+ * 单独一个 `none` 由管理页存成空数组，表示不支持调节思考。
+ */
+function manualLevels(levels: string[]): string[] {
+	return levels.map((level) => (level === "off" ? "none" : level));
+}
+
 function resolveThinking(
 	override: ModelOverride | undefined,
 	model: CatalogModel,
 	builtin: BuiltinModel | undefined,
+	api: Api,
 ): { reasoning: Sourced<boolean>; map: Sourced<ThinkingLevelMap | undefined> } {
 	if (override?.thinkingLevelMap || override?.thinkingLevels) {
-		const map = override.thinkingLevelMap ?? levelsToMap(override.thinkingLevels ?? []);
-		const reasoning = Object.values(map).some((value) => value !== null);
+		const map = override.thinkingLevelMap ?? levelsToMap(manualLevels(override.thinkingLevels ?? []), api);
+		const reasoning = hasThinking(map);
 		return { reasoning: { value: reasoning, source: "manual" }, map: { value: reasoning ? map : undefined, source: "manual" } };
 	}
 	if (model.reasoningLevels) {
-		const map = levelsToMap(model.reasoningLevels);
+		const map = levelsToMap(model.reasoningLevels, api);
 		// 档位列表为空（如 claude-opus-5-5-high）：思考强度已固定在模型名里，不让 pi 发思考参数。
-		const usable = Object.values(map).some((value) => value !== null);
+		const usable = hasThinking(map);
 		return {
 			reasoning: { value: usable, source: "server" },
 			map: { value: usable ? map : undefined, source: "server" },
@@ -188,7 +216,7 @@ export function resolveModel(
 	const vendor = vendorOf(model.id, model.ownedBy);
 	const builtin = findBuiltin(model.id, vendor);
 	const api = selectApi(model, service, override);
-	const thinking = resolveThinking(override, model, builtin);
+	const thinking = resolveThinking(override, model, builtin, api.value);
 	// 协议和原厂条目不同时（如手动把 Claude 改成走 openai-completions），抄来的 compat 不适用。
 	const compatFrom = compatSource(vendor, model, catalog);
 	// 价格一律按官方 API，GPT 也找 openai，不找订阅版。
@@ -200,7 +228,8 @@ export function resolveModel(
 		ownedBy: model.ownedBy,
 		hidden: model.hidden ?? false,
 		missing,
-		name: pick(override?.name, model.name, builtin?.name, model.id),
+		// 去掉后缀才匹配上时不借用名字，否则 claude-opus-5-5 和 claude-opus-5-5-high 会显示成同一个名字。
+		name: pick(override?.name, model.name, builtin && sameModel(builtin.id, model.id) ? builtin.name : undefined, model.id),
 		api,
 		baseUrl: override?.baseUrl
 			? { value: override.baseUrl, source: "manual" }
@@ -221,13 +250,17 @@ export function resolveModel(
 	};
 }
 
-/** 列出服务上的全部模型；已启用但目录里没有的也列出来，方便发现问题。 */
+function sameModel(builtinId: string, id: string): boolean {
+	return builtinId === id || builtinId === id.slice(id.lastIndexOf("/") + 1);
+}
+
+/** 列出服务上的全部模型；已启用但目录里没有的也列出来，读过目录时标为 missing。 */
 export function resolveService(service: ServiceConfig, catalog: Catalog | undefined): ResolvedModel[] {
 	const models = catalog?.models ?? [];
 	const known = new Set(models.map((model) => model.id));
 	const resolved = models.map((model) => resolveModel(service, model, catalog));
 	for (const id of service.enabled) {
-		if (!known.has(id)) resolved.push(resolveModel(service, { id }, catalog, true));
+		if (!known.has(id)) resolved.push(resolveModel(service, { id }, catalog, catalog !== undefined));
 	}
 	return resolved;
 }

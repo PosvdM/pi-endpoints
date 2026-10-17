@@ -6,7 +6,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { ModelOverride, ServiceConfig } from "../config.ts";
 import { describeError, type Endpoints } from "../endpoints.ts";
-import { type ResolvedModel, supportedLevels, toProviderModel } from "../resolve.ts";
+import { type ResolvedModel, SUPPORTED_APIS, supportedLevels, toProviderModel } from "../resolve.ts";
 
 export interface WebUI {
 	url: string;
@@ -16,14 +16,6 @@ export interface WebUI {
 const PAGE = new URL("./page.html", import.meta.url);
 const MAX_BODY = 1024 * 1024;
 const TEST_TIMEOUT_MS = 60_000;
-
-export const APIS: Api[] = [
-	"openai-completions",
-	"openai-responses",
-	"anthropic-messages",
-	"google-generative-ai",
-	"mistral-conversations",
-];
 
 class HttpError extends Error {
 	readonly status: number;
@@ -63,8 +55,10 @@ export async function startWebUI(endpoints: Endpoints): Promise<WebUI> {
 }
 
 function sameToken(given: string | null | undefined, token: string): boolean {
-	if (!given || given.length !== token.length) return false;
-	return timingSafeEqual(Buffer.from(given), Buffer.from(token));
+	if (!given) return false;
+	const a = Buffer.from(given);
+	const b = Buffer.from(token);
+	return a.length === b.length && timingSafeEqual(a, b);
 }
 
 async function handle(endpoints: Endpoints, token: string, request: IncomingMessage, response: ServerResponse) {
@@ -214,7 +208,8 @@ function modelView(model: ResolvedModel, service: ServiceConfig) {
 function state(endpoints: Endpoints) {
 	const statuses = new Map(endpoints.status().map((status) => [status.name, status]));
 	return {
-		apis: APIS,
+		apis: SUPPORTED_APIS,
+		loadError: endpoints.loadError,
 		services: endpoints.config.services.map((service) => {
 			const catalog = endpoints.catalog(service.name);
 			return {

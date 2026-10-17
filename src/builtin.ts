@@ -7,10 +7,18 @@ export type BuiltinModel = Model<Api>;
 export type Vendor = "anthropic" | "openai" | "google" | "xai";
 
 /**
- * 这些服务商转卖别家的模型，参数和原厂不一定一致，按名字匹配时不用它们。
+ * 这些服务商转卖别家的模型，或者是订阅套餐，参数和原厂不一定一致，按名字匹配时不用它们。
  * openai-codex 是订阅版，只在抄 compat 时单独使用。
  */
 const RESELLERS = new Set([
+	"kimi-coding",
+	"qwen-token-plan",
+	"qwen-token-plan-cn",
+	"qwen-token-plan-individual",
+	"xiaomi-token-plan-ams",
+	"xiaomi-token-plan-cn",
+	"xiaomi-token-plan-sgp",
+	"zai-coding-cn",
 	"amazon-bedrock",
 	"azure",
 	"cloudflare-ai-gateway",
@@ -53,7 +61,15 @@ export function builtinProviderIds(): string[] {
 	return [...catalog().keys()];
 }
 
+/**
+ * 模型名里明确写着 claude、gemini、grok 时以名字为准：one-api 类中转站常把经 OpenAI 兼容渠道
+ * 提供的 Claude 也标成 `owned_by: openai`。其余情况先看 owned_by，再看名字。
+ */
 export function vendorOf(id: string, ownedBy?: string): Vendor | undefined {
+	const name = id.toLowerCase();
+	if (name.includes("claude")) return "anthropic";
+	if (name.includes("gemini") || name.includes("gemma")) return "google";
+	if (name.includes("grok")) return "xai";
 	switch (ownedBy?.toLowerCase()) {
 		case "anthropic":
 		case "claude":
@@ -68,10 +84,6 @@ export function vendorOf(id: string, ownedBy?: string): Vendor | undefined {
 		case "grok":
 			return "xai";
 	}
-	const name = id.toLowerCase();
-	if (name.includes("claude")) return "anthropic";
-	if (name.includes("gemini") || name.includes("gemma")) return "google";
-	if (name.includes("grok")) return "xai";
 	if (name.includes("gpt") || /(^|\/)o\d/.test(name) || name.includes("codex")) return "openai";
 	return undefined;
 }

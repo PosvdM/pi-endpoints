@@ -15,11 +15,13 @@ const ON = "启用";
 const OFF = "—";
 
 export function registerCommands(pi: ExtensionAPI, endpoints: Endpoints): void {
-	let web: WebUI | undefined;
+	// 存 Promise 而不是结果，连按两次 /endpoints ui 时不会启动两个服务器。
+	let web: Promise<WebUI> | undefined;
 
 	pi.on("session_shutdown", async () => {
-		await web?.close();
+		const running = web;
 		web = undefined;
+		await (await running?.catch(() => undefined))?.close();
 	});
 
 	pi.registerCommand("endpoints", {
@@ -32,9 +34,17 @@ export function registerCommands(pi: ExtensionAPI, endpoints: Endpoints): void {
 			const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			switch (sub) {
 				case "ui": {
-					web ??= await startWebUI(endpoints);
-					openBrowser(web.url);
-					ctx.ui.notify(`管理页已打开：${web.url}`, "info");
+					web ??= startWebUI(endpoints);
+					let ui: WebUI;
+					try {
+						ui = await web;
+					} catch (error) {
+						web = undefined;
+						ctx.ui.notify(`管理页启动失败：${describeError(error)}`, "error");
+						return;
+					}
+					openBrowser(ui.url);
+					ctx.ui.notify(`管理页已打开：${ui.url}`, "info");
 					return;
 				}
 				case "models":
@@ -47,12 +57,12 @@ export function registerCommands(pi: ExtensionAPI, endpoints: Endpoints): void {
 					}
 					const failures = await endpoints.refreshAll(ctx.signal);
 					const ok = endpoints.config.services.length - failures.size;
-					const lines = [`已刷新 ${ok} 个服务`, ...[...failures].map(([name, error]) => `${name}：${error}`)];
+					const lines = [`已刷新 ${ok} 个服务`, ...[...failures].map(([name, error]) => `${name}：${printable(error)}`)];
 					ctx.ui.notify(lines.join("\n"), failures.size ? "warning" : "info");
 					return;
 				}
 				case "status":
-					ctx.ui.notify(formatStatus(endpoints.status()), "info");
+					ctx.ui.notify(formatStatus(endpoints.status(), endpoints.loadError), endpoints.loadError ? "error" : "info");
 					return;
 				default:
 					ctx.ui.notify(`未知的子命令 ${sub}。可用：${SUBCOMMANDS.map((item) => item.value).join(" | ")}`, "warning");
@@ -61,7 +71,13 @@ export function registerCommands(pi: ExtensionAPI, endpoints: Endpoints): void {
 	});
 }
 
-export function formatStatus(statuses: ServiceStatus[]): string {
+/** 去掉服务端原文里的控制字符，免得 ANSI 转义序列搅乱终端。保留换行。 */
+export function printable(text: string): string {
+	return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
+export function formatStatus(statuses: ServiceStatus[], loadError?: string): string {
+	if (loadError) return `读取配置失败：${printable(loadError)}\n修好文件后运行 /reload。`;
 	if (statuses.length === 0) return "还没有添加服务。运行 /endpoints ui 添加。";
 	return statuses
 		.map((status) => {
@@ -75,7 +91,7 @@ export function formatStatus(statuses: ServiceStatus[]): string {
 			];
 			const lines = [parts.join("，")];
 			if (status.missing.length) lines.push(`  目录里没有：${status.missing.join("、")}`);
-			if (status.error) lines.push(`  上次刷新失败：${status.error}`);
+			if (status.error) lines.push(`  错误：${printable(status.error)}`);
 			return lines.join("\n");
 		})
 		.join("\n");
@@ -101,7 +117,7 @@ async function chooseModels(endpoints: Endpoints, ctx: ExtensionCommandContext, 
 		try {
 			await endpoints.refresh(name, ctx.signal);
 		} catch (error) {
-			ctx.ui.notify(`读取 ${name} 的模型目录失败：${describeError(error)}`, "error");
+			ctx.ui.notify(`读取 ${name} 的模型目录失败：${printable(describeError(error))}`, "error");
 			return;
 		}
 	}
@@ -133,7 +149,7 @@ async function chooseModels(endpoints: Endpoints, ctx: ExtensionCommandContext, 
 
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 		const container = new Container();
-		container.addChild(new Text(theme.fg("accent", theme.bold(`${name} 的模型（空格切换，可输入筛选，Esc 结束）`)), 1, 0));
+		container.addChild(new Text(theme.fg("accent", theme.bold(`${name} 的模型（Enter 切换，输入文字筛选，Esc 结束）`)), 1, 0));
 		const list = new SettingsList(
 			items,
 			Math.min(items.length + 2, 20),

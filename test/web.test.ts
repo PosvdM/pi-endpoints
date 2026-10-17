@@ -129,3 +129,10 @@ describe("管理页的操作", () => {
 		expect(state.refreshError).toContain("Invalid token");
 	});
 });
+
+describe("token 比较", () => {
+	it("长度相同但含非 ASCII 字符的 token 返回 403", async () => {
+		const fake = "é".repeat(token.length);
+		expect((await call("/api/state", undefined, { "x-endpoints-token": fake })).status).toBe(403);
+	});
+});

@@ -242,3 +242,46 @@ describe("resolveService", () => {
 		]);
 	});
 });
+
+describe("审查后补充的规则", () => {
+	it("按协议去掉 pi 发不出去的档位，off 沿用服务端写法", () => {
+		const google = levelsToMap(["low", "high", "xhigh", "max"], "google-generative-ai");
+		expect([google.xhigh, google.max]).toEqual([null, null]);
+		expect(levelsToMap(["minimal", "low"], "anthropic-messages").minimal).toBeNull();
+		expect(levelsToMap(["off", "low"]).off).toBe("off");
+		expect(levelsToMap(["none", "low"]).off).toBe("none");
+	});
+
+	it("只剩 off 时算作不支持调节思考", () => {
+		const model = resolveModel(service(), { id: "x", reasoningLevels: ["none"] }, catalog([]));
+		expect(model.reasoning.value).toBe(false);
+	});
+
+	it("手动写的不完整 thinkingLevelMap 按 pi 的规则判断", () => {
+		const model = resolveModel(service({ overrides: { x: { thinkingLevelMap: { off: null } } } }), { id: "x" }, catalog([]));
+		expect(model.reasoning).toEqual({ value: true, source: "manual" });
+		expect(supportedLevels(model.reasoning.value, model.thinkingLevelMap.value)).toEqual(["minimal", "low", "medium", "high"]);
+	});
+
+	it("手动档位里的 none 或 off 和其他档位一起出现时表示可以关闭思考", () => {
+		for (const levels of [["none", "low"], ["off", "low"]]) {
+			const model = resolveModel(service({ overrides: { x: { thinkingLevels: levels } } }), { id: "x" }, catalog([]));
+			expect(model.thinkingLevelMap.value?.off).toBe("none");
+			expect(supportedLevels(model.reasoning.value, model.thinkingLevelMap.value)).toEqual(["off", "low"]);
+		}
+	});
+
+	it("去掉后缀才匹配上时不借用 pi 自带的名字", () => {
+		expect(resolveModel(service(), { id: "claude-opus-5-5-high" }, catalog([])).name).toEqual({ value: "claude-opus-5-5-high", source: "default" });
+		expect(resolveModel(service(), { id: "claude/claude-opus-5-5" }, catalog([])).name.source).toBe("pi");
+	});
+
+	it("模型名明确是 Claude 时不看 owned_by 判断原厂", () => {
+		expect(vendorOf("claude-opus-5-5", "openai")).toBe("anthropic");
+		expect(resolveModel(service(), { id: "claude-opus-5-5", ownedBy: "openai" }, catalog([])).cost.value.input).toBe(4);
+	});
+
+	it("没读过目录时，已启用的模型不标为目录里没有", () => {
+		expect(resolveService(service({ enabled: ["a"] }), undefined)[0].missing).toBe(false);
+	});
+});

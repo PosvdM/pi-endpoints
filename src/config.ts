@@ -76,23 +76,26 @@ function writeJson(path: string, value: unknown, secret = false): void {
 	if (secret && process.platform !== "win32") chmodSync(path, 0o600);
 }
 
-export function normalizeService(service: Partial<ServiceConfig> & { name: string; baseUrl: string }): ServiceConfig {
+/** 补齐缺省字段。手工编辑的文件可能缺字段或类型不对，这里只保证结构，内容由 Endpoints 校验。 */
+export function normalizeService(service: Partial<ServiceConfig>): ServiceConfig {
 	return {
 		...service,
+		name: typeof service.name === "string" ? service.name : "",
 		baseUrl: normalizeRoot(service.baseUrl),
-		enabled: service.enabled ?? [],
-		overrides: service.overrides ?? {},
+		enabled: Array.isArray(service.enabled) ? service.enabled.filter((id) => typeof id === "string") : [],
+		overrides: service.overrides && typeof service.overrides === "object" ? service.overrides : {},
 	};
 }
 
 /** 去掉末尾的 `/` 和 `/v1`，用户填 `https://x.com/v1` 和 `https://x.com` 效果一样。 */
-export function normalizeRoot(url: string): string {
-	return url.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+export function normalizeRoot(url: unknown): string {
+	return typeof url === "string" ? url.trim().replace(/\/+$/, "").replace(/\/v1$/, "") : "";
 }
 
 export function loadConfig(): EndpointsConfig {
 	const raw = readJson<Partial<EndpointsConfig>>(configPath(), {});
-	return { services: (raw.services ?? []).map(normalizeService) };
+	if (raw.services !== undefined && !Array.isArray(raw.services)) throw new Error(`${configPath()} 里的 services 要是数组`);
+	return { services: (raw.services ?? []).filter((item) => item && typeof item === "object").map(normalizeService) };
 }
 
 export function saveConfig(config: EndpointsConfig): void {

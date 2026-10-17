@@ -1,4 +1,4 @@
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeConfigValue, normalizeRoot } from "../src/config.ts";
@@ -165,5 +165,90 @@ describe("Endpoints", () => {
 		writeFileSync(join(temp.dir, "endpoints-cache.json"), "{oops");
 		const { pi } = fakePi();
 		expect(() => new Endpoints(pi)).not.toThrow();
+	});
+});
+
+describe("Endpoints 的校验和并发", () => {
+	it("交给 pi 的请求头按字面值转义，非字符串的值被拒绝", () => {
+		const { pi, providers } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({ name: "a", baseUrl: "https://a.test", headers: { "X-Token": "!echo hi", "X-Price": "$5" }, enabled: ["m"], overrides: {} });
+		endpoints.setKey("a", "k");
+		expect(providers.get("a")?.models?.[0].headers).toEqual({ "X-Token": "$!echo hi", "X-Price": "$$5" });
+		expect(() => endpoints.saveService({ name: "b", baseUrl: "https://b.test", headers: { X: 1 } as never, enabled: [], overrides: {} })).toThrow(/字符串/);
+	});
+
+	it("校验环境变量名、协议和手动设置", () => {
+		const { pi } = fakePi();
+		const endpoints = new Endpoints(pi);
+		expect(() => endpoints.saveService({ name: "a", baseUrl: "https://a.test", apiKeyEnv: "$KEY", enabled: [], overrides: {} })).toThrow(/环境变量/);
+		expect(() => endpoints.saveService({ name: "a", baseUrl: "https://a.test", defaultApi: "nope", enabled: [], overrides: {} })).toThrow(/协议/);
+		endpoints.saveService({ name: "a", baseUrl: "https://a.test", enabled: [], overrides: {} });
+		expect(() => endpoints.setOverride("a", "m", { contextWindow: -1 })).toThrow(/上下文/);
+		expect(() => endpoints.setOverride("a", "m", { api: "nope" })).toThrow(/协议/);
+		expect(() => endpoints.setOverride("a", "m", { thinkingLevels: ["ultra"] })).toThrow(/思考档位/);
+		expect(() => endpoints.setOverride("a", "m", { cost: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 } })).toThrow(/价格/);
+	});
+
+	it("刷新期间删除服务时不写回过期目录", async () => {
+		let release: (value: Response) => void = () => {};
+		vi.stubGlobal("fetch", (url: string) =>
+			url.includes("client_version") ? Promise.resolve(new Response("{}")) : new Promise<Response>((resolve) => (release = resolve)),
+		);
+		const { pi } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({ name: "a", baseUrl: "https://a.test", enabled: [], overrides: {} });
+		endpoints.setKey("a", "k");
+		const pending = endpoints.refresh("a");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		endpoints.removeService("a");
+		release(new Response(JSON.stringify({ data: [{ id: "m" }] })));
+		await pending;
+		const cacheFile = join(temp.dir, "endpoints-cache.json");
+		expect(existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, "utf8")) : {}).toEqual({});
+	});
+
+	it("改名时带走错误记录", async () => {
+		vi.stubGlobal("fetch", async () => new Response("down", { status: 503 }));
+		const { pi } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({ name: "a", baseUrl: "https://a.test", enabled: [], overrides: {} });
+		endpoints.setKey("a", "k");
+		await expect(endpoints.refresh("a")).rejects.toThrow();
+		endpoints.saveService({ name: "b", baseUrl: "https://a.test", enabled: [], overrides: {} }, "a");
+		endpoints.saveService({ name: "a", baseUrl: "https://new.test", enabled: [], overrides: {} });
+		expect(endpoints.status().find((status) => status.name === "a")?.error).toBeUndefined();
+		expect(endpoints.status().find((status) => status.name === "b")?.error).toContain("down");
+	});
+
+	it("另一个 pi 进程的修改不会被覆盖", () => {
+		const first = new Endpoints(fakePi().pi);
+		const second = new Endpoints(fakePi().pi);
+		first.saveService({ name: "a", baseUrl: "https://a.test", enabled: [], overrides: {} });
+		second.saveService({ name: "b", baseUrl: "https://b.test", enabled: [], overrides: {} });
+		first.setEnabled("a", "m", true);
+		const saved = JSON.parse(readFileSync(join(temp.dir, "endpoints.json"), "utf8"));
+		expect(saved.services.map((service: { name: string }) => service.name)).toEqual(["a", "b"]);
+	});
+
+	it("配置文件损坏时照常加载，拒绝修改并保留原文件", () => {
+		writeFileSync(join(temp.dir, "endpoints.json"), "{broken");
+		const endpoints = new Endpoints(fakePi().pi);
+		expect(endpoints.loadError).toContain("endpoints.json");
+		expect(() => endpoints.saveService({ name: "a", baseUrl: "https://a.test", enabled: [], overrides: {} })).toThrow(/reload/);
+		expect(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).toBe("{broken");
+	});
+
+	it("手工写坏的服务不注册，并记录原因", () => {
+		writeFileSync(
+			join(temp.dir, "endpoints.json"),
+			JSON.stringify({ services: [{ name: "openai", baseUrl: "https://x.test", enabled: ["m"] }, { name: "nourl", enabled: ["m"] }] }),
+		);
+		writeFileSync(join(temp.dir, "endpoints-auth.json"), JSON.stringify({ openai: { apiKey: "k" }, nourl: { apiKey: "k" } }));
+		const { pi, providers } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.registerAll();
+		expect(providers.size).toBe(0);
+		expect(endpoints.status().map((status) => status.error)).toEqual([expect.stringContaining("自带"), expect.stringContaining("地址")]);
 	});
 });
