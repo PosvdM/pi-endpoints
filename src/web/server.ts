@@ -127,7 +127,8 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 		case "saveService": {
 			const input = body.service as Partial<ServiceConfig> | undefined;
 			if (!input) throw new HttpError(400, "缺少 service");
-			endpoints.saveService(
+			const previousName = typeof body.previousName === "string" ? body.previousName : undefined;
+			const service = endpoints.saveService(
 				{
 					name: str(input.name, "name").trim(),
 					displayName: input.displayName?.trim() || undefined,
@@ -136,8 +137,18 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 					apiKeyEnv: input.apiKeyEnv?.trim() || undefined,
 					headers: input.headers && Object.keys(input.headers).length ? input.headers : undefined,
 				} as ServiceConfig,
-				typeof body.previousName === "string" ? body.previousName : undefined,
+				previousName,
 			);
+			// 添加服务时可以一起带上密钥，能拿到密钥就顺手拉一次目录。拉取失败不影响添加。
+			if (typeof body.apiKey === "string" && body.apiKey.trim()) endpoints.setKey(service.name, body.apiKey);
+			if (previousName === undefined && endpoints.keySource(service.name)) {
+				try {
+					await endpoints.refresh(service.name);
+					endpoints.register(service.name);
+				} catch (error) {
+					return { ...state(endpoints), refreshError: describeError(error) };
+				}
+			}
 			return undefined;
 		}
 		case "removeService":

@@ -87,6 +87,28 @@ describe("管理页的操作", () => {
 		expect(state.services[0]).toMatchObject({ name: "cpa", baseUrl: "https://cpa.test", status: { keySource: "file" } });
 	});
 
+	it("添加服务时带上密钥，会保存密钥并拉取目录", async () => {
+		const seen: string[] = [];
+		vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+			seen.push(new Headers(init?.headers).get("authorization") ?? "");
+			return new Response(JSON.stringify(url.includes("client_version") ? { data: [] } : { data: [{ id: "model-x", owned_by: "custom" }] }));
+		});
+		const state = await (await call("/api/saveService", { apiKey: "sk-very-secret", service: { name: "relay", baseUrl: "https://relay.test" } })).json();
+		expect(state.refreshError).toBeUndefined();
+		expect(JSON.stringify(state)).not.toContain("sk-very-secret");
+		expect(state.services[0]).toMatchObject({ name: "relay", status: { keySource: "file" }, catalog: { size: 1 } });
+		expect(seen).toContain("Bearer sk-very-secret");
+	});
+
+	it("添加服务时拉取目录失败，服务照样保存", async () => {
+		vi.stubGlobal("fetch", async () => new Response('{"error":"Invalid token"}', { status: 401 }));
+		const response = await call("/api/saveService", { apiKey: "sk-1", service: { name: "relay", baseUrl: "https://relay.test" } });
+		expect(response.status).toBe(200);
+		const state = await response.json();
+		expect(state.refreshError).toContain("Invalid token");
+		expect(state.services[0]).toMatchObject({ name: "relay", status: { keySource: "file" } });
+	});
+
 	it("错误以中文原因返回", async () => {
 		const response = await call("/api/saveService", { service: { name: "openai", baseUrl: "https://x.test" } });
 		expect(response.status).toBe(400);
