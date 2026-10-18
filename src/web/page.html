@@ -715,19 +715,21 @@ function renderServiceForm(item) {
 	field("密钥环境变量", apiKeyEnv, "设置了这个环境变量时优先用它");
 	field("默认协议", defaultApi, "其他办法都判断不出协议时使用");
 	field("请求头", headers, "加在这个服务所有请求上，按原样发送。Anthropic 协议的 anthropic-beta 会追加到 pi 自己的 beta 列表里");
-	card.append(form, h("div", { class: "actions" },
-		h("button", { class: "btn primary", onclick: async () => {
-			let parsedHeaders;
-			try { parsedHeaders = parseJsonField(headers.value, "请求头"); } catch (failure) { error = failure.message; render(); return; }
-			const body = { previousName: item?.name, apiKey: apiKey?.value, service: { name: name.value.trim().toLowerCase(), displayName: displayName.value, baseUrl: baseUrl.value, defaultApi: defaultApi.value, apiKeyEnv: apiKeyEnv.value, headers: parsedHeaders ?? {} } };
-			if (await run("saveService", body, isNew ? "已添加" : "已保存")) {
-				serviceDraft = null;
-				current = body.service.name;
-				if (isNew) tab = "models";
-				render();
-			}
-		} }, isNew ? "添加" : "保存"),
-	));
+	const submit = h("button", { class: "btn primary", onclick: async () => {
+		let parsedHeaders;
+		try { parsedHeaders = parseJsonField(headers.value, "请求头"); } catch (failure) { error = failure.message; render(); return; }
+		// 添加服务时还要读取目录，最长等到超时。请求期间禁用按钮，免得重复提交；run() 结束后整页重画，按钮随之恢复。
+		submit.disabled = true;
+		submit.textContent = isNew ? "添加中…" : "保存中…";
+		const body = { previousName: item?.name, apiKey: apiKey?.value, service: { name: name.value.trim().toLowerCase(), displayName: displayName.value, baseUrl: baseUrl.value, defaultApi: defaultApi.value, apiKeyEnv: apiKeyEnv.value, headers: parsedHeaders ?? {} } };
+		if (await run("saveService", body, isNew ? "已添加" : "已保存")) {
+			serviceDraft = null;
+			current = body.service.name;
+			if (isNew) tab = "models";
+			render();
+		}
+	} }, isNew ? "添加" : "保存");
+	card.append(form, h("div", { class: "actions" }, submit));
 	return card;
 }
 
@@ -784,7 +786,8 @@ function render() {
 			h("div", { class: "facts" }, "填好地址和密钥，添加后会自动拉取模型目录，再勾选要启用的模型。"))), renderServiceForm(undefined));
 	} else if (item) {
 		parts.push(renderHead(item));
-		if (item.status?.error) parts.push(h("div", { class: "banner err" }, `错误：${item.status.error}`));
+		// 刷新失败时页面顶部已经显示了同样的原因，关掉顶部提示后再显示这一条。
+		if (item.status?.error && error !== `刷新失败：${item.status.error}`) parts.push(h("div", { class: "banner err" }, `错误：${item.status.error}`));
 		if (!item.status?.keySource) {
 			parts.push(h("div", { class: "banner warn" }, h("span", { class: "grow" }, "还没有设置密钥，模型不会注册到 pi。"),
 				h("button", { class: "btn small", onclick: () => { tab = "settings"; render(); } }, "去设置")));
