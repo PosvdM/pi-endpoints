@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { withBetas } from "../betas.ts";
-import { readDefaultModel, writeDefaultModel } from "../defaults.ts";
+import { clearDefaultModel, readDefaultModel, writeDefaultModel } from "../defaults.ts";
 import type { ModelOverride, ServiceConfig } from "../config.ts";
 import { describeError, type Endpoints } from "../endpoints.ts";
 import { type ResolvedModel, SUPPORTED_APIS, supportedLevels, toProviderModel } from "../resolve.ts";
@@ -178,6 +178,9 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 			await writeDefaultModel(name, id);
 			return undefined;
 		}
+		case "clearDefaultModel":
+			await clearDefaultModel();
+			return undefined;
 		case "setEnabled":
 			endpoints.setEnabled(str(body.name, "name"), str(body.id, "id"), body.enabled === true);
 			return undefined;

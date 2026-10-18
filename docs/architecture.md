@@ -186,7 +186,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `settings.json` 读不了时，`SettingsManager` 不写文件，只把错误记下来，`open()` 先检查加载错误并拒绝写入。
 - 用 `projectTrusted: false` 打开，不读当前目录的 `.pi/settings.json`。写入只写全局设置，读取也只读全局设置，页面上的星标才和刚写入的值一致；项目设置的 `enabledModels` 也不会被合并进全局列表。项目设置里的 `defaultModel` 在那个目录里仍然优先，页面不显示它。
 
-只有已启用、并且服务已注册到 pi 的模型才能设为默认，否则 pi 启动时找不到它，会改用别的模型。开着的 pi 在内存里保留旧的设置，运行 `/reload` 后才读到新的默认模型。
+只有已启用、并且服务已注册到 pi 的模型才能设为默认，否则 pi 启动时找不到它，会改用别的模型。取消默认时调用 `setDefaultModelAndProvider(undefined, undefined)`，写入时这两个字段从 JSON 里去掉，`enabledModels` 不动。pi 没有默认模型时，新会话用 Ctrl+P 列表的第一个，没有列表时用 pi 自带的各服务默认模型或第一个可用模型。开着的 pi 在内存里保留旧的设置，运行 `/reload` 后才读到新的默认模型。
 
 ## 管理页
 

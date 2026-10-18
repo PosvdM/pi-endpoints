@@ -43,6 +43,18 @@ export async function writeDefaultModel(provider: string, id: string): Promise<v
 		!enabledModels.some((pattern) => typeof pattern === "string" && pattern.toLowerCase() === reference.toLowerCase());
 	settings.setDefaultModelAndProvider(provider, id);
 	if (addToScope) settings.setEnabledModels([...enabledModels, reference]);
+	await save(settings);
+}
+
+/** 删掉 settings.json 里的默认模型，pi 新开会话时改用 Ctrl+P 列表的第一个或 pi 自带的默认模型。 */
+export async function clearDefaultModel(): Promise<void> {
+	const settings = open();
+	// 类型只允许字符串；写入时值为 undefined 的字段会从 JSON 里去掉。
+	settings.setDefaultModelAndProvider(undefined as unknown as string, undefined as unknown as string);
+	await save(settings);
+}
+
+async function save(settings: SettingsManager): Promise<void> {
 	await settings.flush();
 	const errors = settings.drainErrors();
 	if (errors.length) throw new Error(`无法写入 pi 的设置：${errors.map((error) => error.error.message).join("；")}`);

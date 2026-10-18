@@ -145,6 +145,7 @@ tr.group b { color: var(--text); font-weight: 600; font-size: 12.5px; margin-rig
 .star:not([aria-disabled]):hover { color: var(--warn); }
 .star[aria-disabled] { cursor: default; }
 .star.on { color: var(--warn); }
+.star.on:hover { opacity: .6; }
 .star.off { opacity: 0; }
 tr:hover .star.off, .star.off:focus-visible, .drawer-head .star.off { opacity: 1; }
 .drawer-head .star { font-size: 18px; margin: 2px 4px 0 0; }
@@ -537,14 +538,17 @@ function refreshDrawerStar() {
 const STAR = (filled) => `<svg viewBox="0 0 24 24" width="1em" height="1em" fill="${filled ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2.8l2.8 5.8 6.4.9-4.6 4.5 1.1 6.3L12 17.3l-5.7 3 1.1-6.3-4.6-4.5 6.4-.9z"/></svg>`;
 
 /**
- * 实心星是 pi 的默认模型；没注册到 pi 时变灰。空心星设为默认，在列表里悬停才显示。
+ * 实心星是 pi 的默认模型，点击取消；没注册到 pi 时变灰。空心星设为默认，在列表里悬停才显示。
  * 点不了的星不用 disabled：禁用的按钮会吞掉点击，列表行就打不开详情了。
  */
 function star(item, model) {
 	const usable = model.enabled && item.status?.registered;
 	if (isDefault(item, model)) {
-		const title = usable ? "pi 默认模型" : "pi 默认模型，但它现在没有注册到 pi，pi 启动时会改用别的模型";
-		return h("button", { class: `star${usable ? " on" : ""}`, title, "aria-disabled": "true", html: STAR(true) });
+		const title = usable ? "pi 默认模型，点击取消" : "pi 默认模型，但它现在没有注册到 pi，pi 启动时会改用别的模型。点击取消";
+		return h("button", { class: `star${usable ? " on" : ""}`, title, onclick: async (event) => {
+			event.stopPropagation();
+			await run("clearDefaultModel", {}, "已取消 pi 默认模型，运行中的 pi 需执行 /reload");
+		}, html: STAR(true) });
 	}
 	if (!usable) {
 		const title = !model.enabled ? "先启用这个模型，才能设为 pi 默认模型" : "服务没有注册到 pi，不能设为默认模型";
@@ -552,7 +556,7 @@ function star(item, model) {
 	}
 	return h("button", { class: "star off", title: "设为 pi 默认模型", onclick: async (event) => {
 		event.stopPropagation();
-		await run("setDefaultModel", { name: item.name, id: model.id }, "已设为 pi 默认模型，已开着的 pi 运行 /reload 后生效");
+		await run("setDefaultModel", { name: item.name, id: model.id }, "已设为 pi 默认模型，运行中的 pi 需执行 /reload");
 	}, html: STAR(false) });
 }
 
