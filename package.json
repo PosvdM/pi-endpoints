@@ -1,6 +1,6 @@
 {
   "name": "pi-endpoints",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "让 pi 通过自己的 API 服务（CLIProxyAPI、Magpie、new-api 类中转站等）使用模型：只注册选定的模型，参数和协议取自服务端目录",
   "type": "module",
   "keywords": [
