@@ -181,6 +181,12 @@ describe("pi 默认模型", () => {
 		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).enabledModels).toEqual(["cpa/a", "relay/model-x"]);
 	});
 
+	it("enabledModels 格式不对时照样写入默认模型，不动这个列表", async () => {
+		writeFileSync(settingsFile(), JSON.stringify({ enabledModels: "cpa/a" }));
+		expect((await call("/api/setDefaultModel", { name: "relay", id: "model-x" })).status).toBe(200);
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ enabledModels: "cpa/a", defaultProvider: "relay", defaultModel: "model-x" });
+	});
+
 	it("没启用的模型和停用的服务不能设为默认", async () => {
 		expect((await call("/api/setDefaultModel", { name: "relay", id: "other" })).status).toBe(400);
 		await call("/api/setServiceDisabled", { name: "relay", disabled: true });

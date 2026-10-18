@@ -141,13 +141,12 @@ tr.group b { color: var(--text); font-weight: 600; font-size: 12.5px; margin-rig
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
 .tag.accent { background: var(--accent-soft); color: var(--accent-text); }
 .star { border: 0; background: none; padding: 0 2px; margin-left: 4px; font-size: 14px; line-height: 0; color: var(--faint); cursor: pointer; vertical-align: -2px; }
-.star:not(:disabled):hover { color: var(--warn); }
-.star:disabled { cursor: default; }
+.star:not([aria-disabled]):hover { color: var(--warn); }
+.star[aria-disabled] { cursor: default; }
 .star.on { color: var(--warn); }
-.star.off { visibility: hidden; }
-tr:hover .star.off, .star.off:focus-visible { visibility: visible; }
+.star.off { opacity: 0; }
+tr:hover .star.off, .star.off:focus-visible, .drawer-head .star.off { opacity: 1; }
 .drawer-head .star { font-size: 18px; margin: 2px 4px 0 0; }
-.drawer-head .star.off { visibility: visible; }
 .warn { color: var(--warn); }
 .empty { padding: 56px 0; text-align: center; color: var(--muted); }
 
@@ -528,15 +527,21 @@ function refreshDrawerStar() {
 // 用 SVG 画星，字符 ★ 在部分系统上显示成彩色 emoji，颜色不受 CSS 控制。
 const STAR = (filled) => `<svg viewBox="0 0 24 24" width="1em" height="1em" fill="${filled ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2.8l2.8 5.8 6.4.9-4.6 4.5 1.1 6.3L12 17.3l-5.7 3 1.1-6.3-4.6-4.5 6.4-.9z"/></svg>`;
 
-/** 实心星是 pi 的默认模型；没注册到 pi 时变灰。空心星设为默认，在列表里悬停才显示。 */
+/**
+ * 实心星是 pi 的默认模型；没注册到 pi 时变灰。空心星设为默认，在列表里悬停才显示。
+ * 点不了的星不用 disabled：禁用的按钮会吞掉点击，列表行就打不开详情了。
+ */
 function star(item, model) {
 	const usable = model.enabled && item.status?.registered;
 	if (isDefault(item, model)) {
 		const title = usable ? "pi 默认模型" : "pi 默认模型，但它现在没有注册到 pi，pi 启动时会改用别的模型";
-		return h("button", { class: `star${usable ? " on" : ""}`, title, disabled: true, html: STAR(true) });
+		return h("button", { class: `star${usable ? " on" : ""}`, title, "aria-disabled": "true", html: STAR(true) });
 	}
-	const title = !model.enabled ? "先启用这个模型，才能设为 pi 默认模型" : !usable ? "服务没有注册到 pi，不能设为默认模型" : "设为 pi 默认模型";
-	return h("button", { class: "star off", title, disabled: !usable || undefined, onclick: async (event) => {
+	if (!usable) {
+		const title = !model.enabled ? "先启用这个模型，才能设为 pi 默认模型" : "服务没有注册到 pi，不能设为默认模型";
+		return h("button", { class: "star off", title, "aria-disabled": "true", html: STAR(false) });
+	}
+	return h("button", { class: "star off", title: "设为 pi 默认模型", onclick: async (event) => {
 		event.stopPropagation();
 		await run("setDefaultModel", { name: item.name, id: model.id }, "已设为 pi 默认模型，已开着的 pi 运行 /reload 后生效");
 	}, html: STAR(false) });
@@ -545,7 +550,7 @@ function star(item, model) {
 function modelRow(item, model) {
 	const needsFix = model.contextWindow.source === "default" || model.maxTokens.source === "default";
 	return h("tr", { class: openModel === model.id ? "open" : "", onclick: (event) => {
-		if (event.target.closest("input, button")) return;
+		if (event.target.closest("input, button:not([aria-disabled])")) return;
 		openModel = model.id;
 		renderDrawer();
 		render();

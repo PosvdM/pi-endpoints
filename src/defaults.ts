@@ -5,11 +5,14 @@ export interface DefaultModel {
 	id: string;
 }
 
-/** 用 pi 自己的 SettingsManager 读写 settings.json，它会加锁，并且只合并改动的字段。 */
+/**
+ * 用 pi 自己的 SettingsManager 读写全局的 settings.json，它会加锁，并且只合并改动的字段。
+ * 不读项目设置：写入只写全局，读也只读全局，页面显示的才是刚写入的值。
+ */
 function open(): SettingsManager {
-	const settings = SettingsManager.create(process.cwd(), getAgentDir());
-	// 读不了全局的 settings.json 时 SettingsManager 不写文件，也不报错，这里先拦下来。
-	const failure = settings.drainErrors().find((error) => error.scope === "global");
+	const settings = SettingsManager.create(process.cwd(), getAgentDir(), { projectTrusted: false });
+	// 读不了 settings.json 时 SettingsManager 不写文件，只记录错误，这里先拦下来。
+	const failure = settings.drainErrors()[0];
 	if (failure) throw new Error(`无法读取 ${failure.path ?? "pi 的 settings.json"}：${failure.error.message}`);
 	return settings;
 }
@@ -30,13 +33,16 @@ export function readDefaultModel(): DefaultModel | undefined {
 /** 效果和在 pi 的 /model 里按 Ctrl+S 相同。 */
 export async function writeDefaultModel(provider: string, id: string): Promise<void> {
 	const settings = open();
-	settings.setDefaultModelAndProvider(provider, id);
 	// pi 在设置了 Ctrl+P 轮换列表时会把新的默认模型加进去。这里只比对完整的模型名，不展开通配符。
+	// 先算好再写，列表格式不对时直接报错，不会只写了一半。
 	const enabledModels = settings.getEnabledModels();
 	const reference = `${provider}/${id}`;
-	if (enabledModels?.length && !enabledModels.some((pattern) => pattern.toLowerCase() === reference.toLowerCase())) {
-		settings.setEnabledModels([...enabledModels, reference]);
-	}
+	const addToScope =
+		Array.isArray(enabledModels) &&
+		enabledModels.length > 0 &&
+		!enabledModels.some((pattern) => typeof pattern === "string" && pattern.toLowerCase() === reference.toLowerCase());
+	settings.setDefaultModelAndProvider(provider, id);
+	if (addToScope) settings.setEnabledModels([...enabledModels, reference]);
 	await settings.flush();
 	const errors = settings.drainErrors();
 	if (errors.length) throw new Error(`无法写入 pi 的设置：${errors.map((error) => error.error.message).join("；")}`);
