@@ -192,6 +192,8 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `testModel` 返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`。
 - `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。
 
+页面的状态变化后，`render()` 重建整个内容区，包括操作失败时显示错误。服务表单因此把还没保存的内容记在 `serviceDraft` 里，按服务名区分，重建时优先用它；保存成功、切换服务或点"添加服务"时清掉。新增其他会被 `render()` 重建的表单时，也要这样保存输入。添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随。
+
 模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写），分组和前缀按钮按 `byPrefix()` 排序：`PREFIX_ORDER` 里的前缀按列表顺序排在前面，其余按字母序；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。
 
 `testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，Anthropic 协议的模型同样经过 `withBetas()`，不设置思考档位，超时 60 秒。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。

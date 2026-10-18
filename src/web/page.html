@@ -256,6 +256,7 @@ function byPrefix(a, b) {
 }
 let error = null;
 let toastTimer;
+let serviceDraft = null; // 服务表单里还没保存的内容：{ key: 服务名，新建时为 "", nameTouched, values }
 
 const $ = (sel, root = document) => root.querySelector(sel);
 function h(tag, attrs = {}, ...children) {
@@ -354,6 +355,7 @@ function select(item) {
 	Object.assign(view, { api: "", owner: "", prefix: "" });
 	openModel = null;
 	error = null;
+	serviceDraft = null;
 	render();
 }
 
@@ -665,21 +667,45 @@ function overrideForm(item, model) {
 
 /* ---------- 服务设置 ---------- */
 
+// 服务名：小写字母、数字、点、下划线和连字符，以字母或数字开头。显示名里的其他字符换成连字符。
+function slugify(text) {
+	return text.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^[^a-z0-9]+|-+$/g, "");
+}
+
 function renderServiceForm(item) {
 	const isNew = !item;
+	const key = item?.name ?? "";
+	// 出错时整页会重画，表单从 serviceDraft 恢复已填的内容，没有草稿时用已保存的值。
+	const saved = serviceDraft?.key === key ? serviceDraft.values : {
+		name: item?.name ?? "",
+		displayName: item?.displayName ?? "",
+		baseUrl: item?.baseUrl ?? "",
+		defaultApi: item?.defaultApi ?? "",
+		apiKeyEnv: item?.apiKeyEnv ?? "",
+		headers: item && Object.keys(item.headers).length ? JSON.stringify(item.headers, null, 2) : "",
+	};
+	// 添加服务时，名字跟着显示名生成，直到用户自己改名字；把名字清空后重新跟随。
+	let nameTouched = serviceDraft?.key === key ? serviceDraft.nameTouched : false;
+	const remember = () => {
+		serviceDraft = { key, nameTouched, values: { name: name.value, displayName: displayName.value, baseUrl: baseUrl.value, defaultApi: defaultApi.value, apiKeyEnv: apiKeyEnv.value, headers: headers.value } };
+	};
 	const card = h("div", { class: "card" }, h("h3", {}, isNew ? "添加服务" : "服务"));
-	const form = h("div", { class: "form" });
+	const form = h("div", { class: "form", oninput: remember, onchange: remember });
 	const field = (label, input, hint) => form.append(h("label", {}, label), h("div", {}, input, hint ? h("div", { class: "hint" }, hint) : null));
-	const name = h("input", { class: "input", type: "text", value: item?.name ?? "", placeholder: "cpa" });
-	const displayName = h("input", { class: "input", type: "text", value: item?.displayName ?? "", placeholder: "可选，显示在 pi 的模型列表里" });
-	const baseUrl = h("input", { class: "input", type: "text", value: item?.baseUrl ?? "", placeholder: "https://example.com" });
+	const displayName = h("input", { class: "input", type: "text", value: saved.displayName, placeholder: "可选，显示在 pi 的模型列表里", oninput: () => {
+		if (isNew && !nameTouched) name.value = slugify(displayName.value);
+	} });
+	const name = h("input", { class: "input", type: "text", value: saved.name, placeholder: "cpa",
+		oninput: () => { nameTouched = name.value !== ""; },
+		onblur: () => { name.value = name.value.trim().toLowerCase(); remember(); } });
+	const baseUrl = h("input", { class: "input", type: "text", value: saved.baseUrl, placeholder: "https://example.com" });
 	const defaultApi = h("select", { class: "input" }, h("option", { value: "" }, "openai-completions（默认）"), ...state.apis.map((value) => h("option", { value }, value)));
-	defaultApi.value = item?.defaultApi ?? "";
-	const apiKeyEnv = h("input", { class: "input", type: "text", value: item?.apiKeyEnv ?? "", placeholder: "可选，例如 CPA_API_KEY" });
+	defaultApi.value = saved.defaultApi;
+	const apiKeyEnv = h("input", { class: "input", type: "text", value: saved.apiKeyEnv, placeholder: "可选，例如 CPA_API_KEY" });
 	const headers = h("textarea", { class: "input", placeholder: '可选，例如 {"X-Title": "pi"}' });
-	headers.value = item && Object.keys(item.headers).length ? JSON.stringify(item.headers, null, 2) : "";
-	field("名字", name, "pi 里的服务商名，模型写成 名字/模型 id。只能用小写字母、数字、点、下划线和连字符。");
+	headers.value = saved.headers;
 	field("显示名", displayName);
+	field("名字", name, `pi 里的服务商名，模型写成 名字/模型 id。只能用小写字母、数字、点、下划线和连字符。${isNew ? "默认按显示名生成，可以修改。" : ""}`);
 	field("地址", baseUrl, "服务根地址，不带 /v1");
 	field("默认协议", defaultApi, "其他办法都判断不出协议时使用");
 	field("密钥环境变量", apiKeyEnv, "设置了这个环境变量时优先用它");
@@ -688,8 +714,9 @@ function renderServiceForm(item) {
 		h("button", { class: "btn primary", onclick: async () => {
 			let parsedHeaders;
 			try { parsedHeaders = parseJsonField(headers.value, "请求头"); } catch (failure) { error = failure.message; render(); return; }
-			const body = { previousName: item?.name, service: { name: name.value.trim(), displayName: displayName.value, baseUrl: baseUrl.value, defaultApi: defaultApi.value, apiKeyEnv: apiKeyEnv.value, headers: parsedHeaders ?? {} } };
+			const body = { previousName: item?.name, service: { name: name.value.trim().toLowerCase(), displayName: displayName.value, baseUrl: baseUrl.value, defaultApi: defaultApi.value, apiKeyEnv: apiKeyEnv.value, headers: parsedHeaders ?? {} } };
 			if (await run("saveService", body, isNew ? "已添加" : "已保存")) {
+				serviceDraft = null;
 				current = body.service.name;
 				if (isNew) tab = "settings";
 				render();
@@ -723,6 +750,7 @@ function renderDanger(item) {
 		h("button", { class: "btn danger", onclick: async () => {
 			if (!confirm(`删除服务 ${item.name}？它的密钥和目录缓存也会删除。`)) return;
 			if (await run("removeService", { name: item.name }, "已删除")) {
+				serviceDraft = null;
 				current = state.services[0]?.name ?? "";
 				tab = "models";
 				openModel = null;
@@ -761,7 +789,7 @@ function render() {
 	content.replaceChildren(...parts);
 }
 
-$("#add").addEventListener("click", () => { current = ""; openModel = null; error = null; renderDrawer(); render(); });
+$("#add").addEventListener("click", () => { current = ""; openModel = null; error = null; serviceDraft = null; renderDrawer(); render(); });
 document.addEventListener("keydown", (event) => {
 	if (event.key === "Escape" && openModel) { openModel = null; renderDrawer(); render(); }
 });
