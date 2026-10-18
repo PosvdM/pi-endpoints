@@ -42,6 +42,7 @@ aside { background: var(--panel); border-right: 1px solid var(--line); display: 
 .svc .meta { flex: 1; min-width: 0; }
 .svc .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .svc .sub { font-size: 12px; color: var(--muted); }
+.svc-sep { height: 1px; background: var(--line); margin: 6px 10px; }
 .side-foot { padding: 12px 10px 14px; border-top: 1px solid var(--line); }
 .side-foot p { margin: 10px 8px 0; font-size: 11.5px; color: var(--faint); }
 main { overflow: auto; min-width: 0; }
@@ -217,6 +218,8 @@ const ENABLED = " enabled"; // view.prefix 取这个值时只看已启用的模�
 const collapsed = new Set(); // 折叠的前缀分组
 // 服务名 → 点"已启用"按钮时已启用的模型 id。这一页只列这些：停用的先留着，方便改回来，再点一次按钮或刷新页面后移走。
 const pinned = new Map();
+// 服务名 → 打开页面时这个服务是否停用。左栏按这份记录把停用的服务排在下面：切换开关后服务先留在原处，方便改回来，刷新页面后再挪。
+const parked = new Map();
 const CARET = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 
 /**
@@ -336,6 +339,13 @@ function toast(text) {
 }
 
 const service = () => state.services.find((item) => item.name === current);
+
+// 左栏的两组服务：[启用的, 停用的]，组内保持配置文件里的顺序。打开页面后新加的服务按加入时的状态归组。
+function serviceGroups() {
+	for (const item of state.services) if (!parked.has(item.name)) parked.set(item.name, Boolean(item.status?.disabled));
+	return [state.services.filter((item) => !parked.get(item.name)), state.services.filter((item) => parked.get(item.name))];
+}
+const firstService = () => serviceGroups().flat()[0]?.name ?? "";
 const statusClass = (item) => (item.status?.disabled ? "" : item.status?.error ? "err" : item.status?.registered ? "on" : "");
 
 function parseJsonField(text, label) {
@@ -368,26 +378,25 @@ function select(item) {
 }
 
 function renderNav() {
-	$("#services").replaceChildren(
-		...state.services.map((item) =>
-			// 按钮里不能放开关，所以用 div 模拟按钮。
-			h("div", { class: `svc${item.name === current ? " active" : ""}`, role: "button", tabindex: "0", onclick: () => select(item.name), onkeydown: (event) => {
-				if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
-					event.preventDefault();
-					select(item.name);
-				}
-			} },
-				h("span", { class: `status ${statusClass(item)}` }),
-				h("span", { class: "meta" },
-					h("div", { class: "title" }, item.displayName || item.name),
-					h("div", { class: "sub" }, item.status?.disabled ? "已停用" : `${item.models.filter((model) => model.enabled).length} 个已启用`),
-				),
-				h("input", { type: "checkbox", class: "switch", title: item.status?.disabled ? "启用服务" : "停用服务", checked: item.status?.disabled ? undefined : true, onclick: (event) => event.stopPropagation(), onchange: async (event) => {
-					if (!(await run("setServiceDisabled", { name: item.name, disabled: !event.target.checked }))) event.target.checked = !event.target.checked;
-				} }),
+	const [on, off] = serviceGroups();
+	const row = (item) =>
+		// 按钮里不能放开关，所以用 div 模拟按钮。
+		h("div", { class: `svc${item.name === current ? " active" : ""}`, role: "button", tabindex: "0", onclick: () => select(item.name), onkeydown: (event) => {
+			if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+				event.preventDefault();
+				select(item.name);
+			}
+		} },
+			h("span", { class: `status ${statusClass(item)}` }),
+			h("span", { class: "meta" },
+				h("div", { class: "title" }, item.displayName || item.name),
+				h("div", { class: "sub" }, item.status?.disabled ? "已停用" : `${item.models.filter((model) => model.enabled).length} 个已启用`),
 			),
-		),
-	);
+			h("input", { type: "checkbox", class: "switch", title: item.status?.disabled ? "启用服务" : "停用服务", checked: item.status?.disabled ? undefined : true, onclick: (event) => event.stopPropagation(), onchange: async (event) => {
+				if (!(await run("setServiceDisabled", { name: item.name, disabled: !event.target.checked }))) event.target.checked = !event.target.checked;
+			} }),
+		);
+	$("#services").replaceChildren(...on.map(row), ...(on.length && off.length ? [h("div", { class: "svc-sep", role: "separator" })] : []), ...off.map(row));
 }
 
 /* ---------- 服务标题 ---------- */
@@ -812,8 +821,9 @@ function renderDanger(item) {
 		h("button", { class: "btn danger", onclick: async () => {
 			if (!confirm(`删除服务 ${item.name}？它的密钥和目录缓存也会删除。`)) return;
 			if (await run("removeService", { name: item.name }, "已删除")) {
+				parked.delete(item.name);
 				serviceDraft = null;
-				current = state.services[0]?.name ?? "";
+				current = firstService();
 				tab = "models";
 				openModel = null;
 				render();
@@ -859,7 +869,7 @@ document.addEventListener("keydown", (event) => {
 
 api("state").then((data) => {
 	state = data;
-	current = state.services[0]?.name ?? "";
+	current = firstService();
 	render();
 }).catch((failure) => {
 	$("#content").replaceChildren(h("div", { class: "banner err" }, `${failure.message}。请在 pi 里重新运行 /endpoints。`));
