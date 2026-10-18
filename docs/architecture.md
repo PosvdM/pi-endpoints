@@ -27,7 +27,7 @@
 
 ## 并发和过期数据
 
-- 可能同时开着多个 pi，各自持有一份内存里的配置。修改前重新读文件，避免用一份旧内容整份覆盖另一个 pi 刚写入的修改。别的 pi 已注册的服务商不会自动更新，要运行 `/reload`。
+- 可能同时运行多个 pi，各自持有一份内存里的配置。修改前重新读文件，避免用一份旧内容整份覆盖另一个 pi 刚写入的修改。别的 pi 已注册的服务商不会自动更新，要运行 `/reload`。
 - 配置或密钥文件损坏时，`beginChange()` 拒绝修改，免得用空配置覆盖用户待修的文件。
 - `refresh()` 的请求完成后，先用 `isCurrent()` 确认服务还在、地址没变，再写缓存和错误记录。否则请求期间删除、改名或改地址的服务会被写回过期的目录。
 - `refresh()` 自带 15 秒超时，并和调用方的 signal 合并。命令里的 `ctx.signal` 在 agent 空闲时为空，不能依赖它。
@@ -80,7 +80,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 - `baseUrl` 是服务根地址。保存时去掉末尾的 `/` 和 `/v1`。
 - `overrides` 的字段见 `src/config.ts` 的 `ModelOverride`，保存前由 `validateOverride()` 校验。`thinkingLevels` 是 pi 的档位名列表，空数组表示不支持调节思考；列表里的 `off` 和 `none` 都表示可以关闭思考，转换时统一写成 `none`。也可以直接写 `thinkingLevelMap`，它优先于 `thinkingLevels`。
-- `disabled: true` 表示停用整个服务，不注册到 pi，其余字段照常保存。服务开着时不写这个字段。编辑服务设置时沿用原值，只有 `setServiceDisabled()` 修改它。
+- `disabled: true` 表示停用整个服务，不注册到 pi，其余字段照常保存。服务启用时不写这个字段。编辑服务设置时沿用原值，只有 `setServiceDisabled()` 修改它。
 - 服务配置由 `serviceProblem()` 校验：服务名、`http(s)` 地址、`defaultApi` 属于 `SUPPORTED_APIS`、`apiKeyEnv` 是合法的环境变量名、请求头的值都是字符串。手工写坏的服务不注册，原因显示在状态里。
 
 `endpoints-auth.json` 的格式是 `{ "<服务名>": { "apiKey": "..." } }`。在 macOS 和 Linux 上写入时把权限设为 600。
@@ -186,7 +186,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `settings.json` 读不了时，`SettingsManager` 不写文件，只把错误记下来，`open()` 先检查加载错误并拒绝写入。
 - 用 `projectTrusted: false` 打开，不读当前目录的 `.pi/settings.json`。写入只写全局设置，读取也只读全局设置，页面上的星标才和刚写入的值一致；项目设置的 `enabledModels` 也不会被合并进全局列表。项目设置里的 `defaultModel` 在那个目录里仍然优先，页面不显示它。
 
-只有已启用、并且服务已注册到 pi 的模型才能设为默认，否则 pi 启动时找不到它，会改用别的模型。取消默认时调用 `setDefaultModelAndProvider(undefined, undefined)`，写入时这两个字段从 JSON 里去掉，`enabledModels` 不动。pi 没有默认模型时，新会话用 Ctrl+P 列表的第一个，没有列表时用 pi 自带的各服务默认模型或第一个可用模型。开着的 pi 在内存里保留旧的设置，运行 `/reload` 后才读到新的默认模型。
+只有已启用、并且服务已注册到 pi 的模型才能设为默认，否则 pi 启动时找不到它，会改用别的模型。取消默认时调用 `setDefaultModelAndProvider(undefined, undefined)`，写入时这两个字段从 JSON 里去掉，`enabledModels` 不动。pi 没有默认模型时，新会话用 Ctrl+P 列表的第一个，没有列表时用 pi 自带的各服务默认模型或第一个可用模型。运行中的 pi 在内存里保留旧的设置，运行 `/reload` 后才读到新的默认模型。
 
 ## 管理页
 

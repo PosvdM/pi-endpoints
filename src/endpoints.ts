@@ -45,7 +45,7 @@ type CacheFile = ReturnType<typeof loadCache>;
 
 /**
  * 插件的全部状态：配置、密钥、目录缓存，以及向 pi 注册服务商。
- * 可能同时开着多个 pi，所以每次修改前都重新读文件，在最新内容上改动。
+ * 可能同时运行多个 pi，所以每次修改前都重新读文件，在最新内容上改动。
  */
 export class Endpoints {
 	config: EndpointsConfig = { services: [] };

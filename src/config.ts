@@ -84,7 +84,7 @@ export function normalizeService(service: Partial<ServiceConfig>): ServiceConfig
 		...service,
 		name: typeof service.name === "string" ? service.name : "",
 		baseUrl: normalizeRoot(service.baseUrl),
-		// 开着时不写这个字段，免得改动现有配置。
+		// 启用时不写这个字段，免得改动现有配置。
 		disabled: service.disabled === true ? true : undefined,
 		enabled: Array.isArray(service.enabled) ? service.enabled.filter((id) => typeof id === "string") : [],
 		overrides: service.overrides && typeof service.overrides === "object" ? service.overrides : {},
