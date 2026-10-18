@@ -26,12 +26,14 @@ export interface ServiceConfig {
 	displayName?: string;
 	/** 服务根地址，不带 `/v1`。 */
 	baseUrl: string;
-	/** 其他办法都判断不出协议时使用。 */
+	/** 协议按模型分别判断，同一服务可混用多种协议，无需按协议拆分。仅无法判断时使用此项。 */
 	defaultApi?: Api;
 	/** 设置了这个环境变量时，优先用它作为密钥。 */
 	apiKeyEnv?: string;
 	/** 加在这个服务所有请求上的请求头。 */
 	headers?: Record<string, string>;
+	/** 停用整个服务：不注册到 pi，其余设置保留。 */
+	disabled?: boolean;
 	/** 启用的模型 id。 */
 	enabled: string[];
 	overrides: Record<string, ModelOverride>;
@@ -82,6 +84,8 @@ export function normalizeService(service: Partial<ServiceConfig>): ServiceConfig
 		...service,
 		name: typeof service.name === "string" ? service.name : "",
 		baseUrl: normalizeRoot(service.baseUrl),
+		// 开着时不写这个字段，免得改动现有配置。
+		disabled: service.disabled === true ? true : undefined,
 		enabled: Array.isArray(service.enabled) ? service.enabled.filter((id) => typeof id === "string") : [],
 		overrides: service.overrides && typeof service.overrides === "object" ? service.overrides : {},
 	};

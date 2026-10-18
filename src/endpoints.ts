@@ -25,6 +25,7 @@ import { PI_LEVELS, type ResolvedModel, resolveService, SUPPORTED_APIS, toProvid
 export interface ServiceStatus {
 	name: string;
 	keySource?: KeySource;
+	disabled: boolean;
 	registered: boolean;
 	catalogAt?: number;
 	catalogSize?: number;
@@ -125,7 +126,7 @@ export class Endpoints {
 		const service = this.service(name);
 		const problem = service ? serviceProblem(service) : undefined;
 		if (problem) this.errors.set(name, problem);
-		const resolved = service && !problem ? resolveKey(service, this.auth) : undefined;
+		const resolved = service && !problem && !service.disabled ? resolveKey(service, this.auth) : undefined;
 		const models = service && resolved ? this.enabledModels(service) : [];
 		// 没有密钥时 pi 也能注册，但会让用户去 /login 输入密钥，和本插件的密钥管理冲突，所以不注册。
 		if (!service || !resolved || models.length === 0) {
@@ -200,6 +201,7 @@ export class Endpoints {
 			return {
 				name: service.name,
 				keySource: this.keySource(service.name),
+				disabled: service.disabled === true,
 				registered: this.registered.has(service.name),
 				catalogAt: catalog?.fetchedAt,
 				catalogSize: catalog?.models.length,
@@ -222,7 +224,8 @@ export class Endpoints {
 		if (service.name !== previousName && this.service(service.name)) throw new Error(`已经有名为 ${service.name} 的服务`);
 
 		if (existing) {
-			// 编辑表单不带模型选择，保留原来的。
+			// 编辑表单不带模型选择和服务开关，保留原来的。
+			service.disabled = existing.disabled;
 			service.enabled = input.enabled ?? existing.enabled;
 			service.overrides = input.overrides ?? existing.overrides;
 			this.config.services[this.config.services.indexOf(existing)] = service;
@@ -278,6 +281,15 @@ export class Endpoints {
 		if (trimmed) this.auth[name] = { apiKey: trimmed };
 		else delete this.auth[name];
 		saveAuth(this.auth);
+		this.registerAll();
+	}
+
+	/** 停用或启用整个服务。 */
+	setServiceDisabled(name: string, disabled: boolean): void {
+		this.beginChange();
+		const service = this.requireService(name);
+		service.disabled = disabled || undefined;
+		saveConfig(this.config);
 		this.registerAll();
 	}
 

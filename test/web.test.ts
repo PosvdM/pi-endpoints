@@ -135,6 +135,11 @@ describe("管理页的操作", () => {
 		expect(state.services[0].status.registered).toBe(true);
 		expect(state.services[0].models[0]).toMatchObject({ enabled: true, levels: ["high"], contextWindow: { value: 64000, source: "server" } });
 
+		state = await (await call("/api/setServiceDisabled", { name: "relay", disabled: true })).json();
+		expect(state.services[0].status).toMatchObject({ disabled: true, registered: false });
+		state = await (await call("/api/setServiceDisabled", { name: "relay", disabled: false })).json();
+		expect(state.services[0].status).toMatchObject({ disabled: false, registered: true });
+
 		state = await (await call("/api/setOverride", { name: "relay", id: "model-x", override: { api: "anthropic-messages", contextWindow: 1000 } })).json();
 		expect(state.services[0].models[0]).toMatchObject({
 			api: { value: "anthropic-messages", source: "manual" },

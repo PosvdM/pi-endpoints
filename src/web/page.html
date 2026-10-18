@@ -328,7 +328,7 @@ function toast(text) {
 }
 
 const service = () => state.services.find((item) => item.name === current);
-const statusClass = (item) => (item.status?.error ? "err" : item.status?.registered ? "on" : "");
+const statusClass = (item) => (item.status?.disabled ? "" : item.status?.error ? "err" : item.status?.registered ? "on" : "");
 
 function parseJsonField(text, label) {
 	const trimmed = text.trim();
@@ -362,12 +362,21 @@ function select(item) {
 function renderNav() {
 	$("#services").replaceChildren(
 		...state.services.map((item) =>
-			h("button", { class: `svc${item.name === current ? " active" : ""}`, onclick: () => select(item.name) },
+			// 按钮里不能放开关，所以用 div 模拟按钮。
+			h("div", { class: `svc${item.name === current ? " active" : ""}`, role: "button", tabindex: "0", onclick: () => select(item.name), onkeydown: (event) => {
+				if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+					event.preventDefault();
+					select(item.name);
+				}
+			} },
 				h("span", { class: `status ${statusClass(item)}` }),
 				h("span", { class: "meta" },
 					h("div", { class: "title" }, item.displayName || item.name),
-					h("div", { class: "sub" }, `${item.models.filter((model) => model.enabled).length} 个已启用`),
+					h("div", { class: "sub" }, item.status?.disabled ? "已停用" : `${item.models.filter((model) => model.enabled).length} 个已启用`),
 				),
+				h("input", { type: "checkbox", class: "switch", title: item.status?.disabled ? "启用服务" : "停用服务", checked: item.status?.disabled ? undefined : true, onclick: (event) => event.stopPropagation(), onchange: async (event) => {
+					if (!(await run("setServiceDisabled", { name: item.name, disabled: !event.target.checked }))) event.target.checked = !event.target.checked;
+				} }),
 			),
 		),
 	);
@@ -377,7 +386,7 @@ function renderNav() {
 
 function renderHead(item) {
 	const status = item.status;
-	const pill = status?.error ? h("span", { class: "pill err" }, "有错误") : status?.registered ? h("span", { class: "pill on" }, "已注册到 pi") : h("span", { class: "pill" }, "未注册");
+	const pill = status?.disabled ? h("span", { class: "pill" }, "已停用") : status?.error ? h("span", { class: "pill err" }, "有错误") : status?.registered ? h("span", { class: "pill on" }, "已注册到 pi") : h("span", { class: "pill" }, "未注册");
 	const key = status?.keySource === "env" ? `密钥来自环境变量 ${item.apiKeyEnv}` : status?.keySource === "file" ? "密钥已设置" : "未设置密钥";
 	const catalog = item.catalog ? `目录 ${item.catalog.size} 个模型 · ${new Date(item.catalog.fetchedAt).toLocaleString()} 刷新` : "还没有读取过目录";
 	const refresh = h("button", { class: "btn", onclick: async () => {
@@ -713,7 +722,7 @@ function renderServiceForm(item) {
 	field("地址", baseUrl, "服务根地址，不带 /v1");
 	if (apiKey) field("密钥", apiKey, "只保存在本机，页面不会再显示");
 	field("密钥环境变量", apiKeyEnv, "设置了这个环境变量时优先用它");
-	field("默认协议", defaultApi, "其他办法都判断不出协议时使用");
+	field("默认协议", defaultApi, "协议按模型分别判断，同一服务可混用多种协议，无需按协议拆分。仅无法判断时使用此项。");
 	field("请求头", headers, "加在这个服务所有请求上，按原样发送。Anthropic 协议的 anthropic-beta 会追加到 pi 自己的 beta 列表里");
 	const submit = h("button", { class: "btn primary", onclick: async () => {
 		let parsedHeaders;

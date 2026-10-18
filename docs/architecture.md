@@ -79,6 +79,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 - `baseUrl` 是服务根地址。保存时去掉末尾的 `/` 和 `/v1`。
 - `overrides` 的字段见 `src/config.ts` 的 `ModelOverride`，保存前由 `validateOverride()` 校验。`thinkingLevels` 是 pi 的档位名列表，空数组表示不支持调节思考；列表里的 `off` 和 `none` 都表示可以关闭思考，转换时统一写成 `none`。也可以直接写 `thinkingLevelMap`，它优先于 `thinkingLevels`。
+- `disabled: true` 表示停用整个服务，不注册到 pi，其余字段照常保存。服务开着时不写这个字段。编辑服务设置时沿用原值，只有 `setServiceDisabled()` 修改它。
 - 服务配置由 `serviceProblem()` 校验：服务名、`http(s)` 地址、`defaultApi` 属于 `SUPPORTED_APIS`、`apiKeyEnv` 是合法的环境变量名、请求头的值都是字符串。手工写坏的服务不注册，原因显示在状态里。
 
 `endpoints-auth.json` 的格式是 `{ "<服务名>": { "apiKey": "..." } }`。在 macOS 和 Linux 上写入时把权限设为 600。
@@ -171,6 +172,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 ## 注册时的约束
 
 - 服务名必须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不能和 pi 自带的服务商同名。用 `registerProvider` 注册同名服务商并提供 `models` 时，会替换掉它全部的自带模型。
+- 停用的服务不注册。
 - 没有密钥时不注册。pi 本身允许注册，但会让用户去 `/login` 输入密钥，和本插件的密钥管理冲突。
 - 已启用但目录里没有的模型仍然注册，用 pi 自带目录和默认值补齐参数。读过目录后，这类模型在管理页里标为"目录里没有"；还没读过目录时不标。
 
@@ -211,7 +213,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 - `catalog.test.ts`：目录解析、合并和请求顺序，用 `vi.stubGlobal("fetch")` 模拟服务端。
 - `resolve.test.ts`：参数分层、思考档位、协议选择、compat、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录。
-- `endpoints.test.ts`：注册条件、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple` 发出的真实请求里，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
+- `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple` 发出的真实请求里，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
 - `web.test.ts`：管理页的 token、Host 和 JSON 检查，以及各项操作。
 
 `test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。

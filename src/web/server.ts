@@ -166,6 +166,9 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 			}
 			return undefined;
 		}
+		case "setServiceDisabled":
+			endpoints.setServiceDisabled(str(body.name, "name"), body.disabled === true);
+			return undefined;
 		case "setEnabled":
 			endpoints.setEnabled(str(body.name, "name"), str(body.id, "id"), body.enabled === true);
 			return undefined;

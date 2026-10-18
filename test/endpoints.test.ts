@@ -72,6 +72,27 @@ describe("Endpoints", () => {
 		expect(providers.has("cpa")).toBe(false);
 	});
 
+	it("停用服务时注销，模型选择保留，编辑设置不改变开关", () => {
+		const { pi, providers } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled: ["model-x"], overrides: {} });
+		endpoints.setKey("cpa", "sk-1");
+		expect(providers.has("cpa")).toBe(true);
+
+		endpoints.setServiceDisabled("cpa", true);
+		expect(providers.has("cpa")).toBe(false);
+		expect(endpoints.status()[0].disabled).toBe(true);
+		expect(endpoints.service("cpa")?.enabled).toEqual(["model-x"]);
+
+		endpoints.saveService({ name: "cpa", displayName: "CPA", baseUrl: "https://cpa.test" } as never, "cpa");
+		expect(endpoints.service("cpa")?.disabled).toBe(true);
+		expect(providers.has("cpa")).toBe(false);
+
+		endpoints.setServiceDisabled("cpa", false);
+		expect(providers.get("cpa")?.models?.map((model) => model.id)).toEqual(["model-x"]);
+		expect(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).not.toContain("disabled");
+	});
+
 	it("密钥单独存放，配置文件里没有密钥", () => {
 		const { pi } = fakePi();
 		const endpoints = new Endpoints(pi);
