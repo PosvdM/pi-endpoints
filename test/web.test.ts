@@ -1,4 +1,6 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Endpoints } from "../src/endpoints.ts";
 import { startWebUI, type WebUI } from "../src/web/server.ts";
@@ -154,6 +156,49 @@ describe("管理页的操作", () => {
 		await call("/api/setKey", { name: "relay", apiKey: "sk-1" });
 		const state = await (await call("/api/refresh", { name: "relay" })).json();
 		expect(state.refreshError).toContain("Invalid token");
+	});
+});
+
+describe("pi 默认模型", () => {
+	const settingsFile = () => join(temp.dir, "settings.json");
+
+	beforeEach(async () => {
+		await call("/api/saveService", { service: { name: "relay", baseUrl: "https://relay.test" } });
+		await call("/api/setKey", { name: "relay", apiKey: "sk-1" });
+		await call("/api/setEnabled", { name: "relay", id: "model-x", enabled: true });
+	});
+
+	it("写进 pi 的 settings.json，保留其他设置，状态里能读到", async () => {
+		writeFileSync(settingsFile(), JSON.stringify({ defaultThinkingLevel: "high" }));
+		const state = await (await call("/api/setDefaultModel", { name: "relay", id: "model-x" })).json();
+		expect(state.defaultModel).toEqual({ provider: "relay", id: "model-x" });
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ defaultThinkingLevel: "high", defaultProvider: "relay", defaultModel: "model-x" });
+	});
+
+	it("设置了 Ctrl+P 轮换列表时把默认模型加进去", async () => {
+		writeFileSync(settingsFile(), JSON.stringify({ enabledModels: ["cpa/a"] }));
+		await call("/api/setDefaultModel", { name: "relay", id: "model-x" });
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).enabledModels).toEqual(["cpa/a", "relay/model-x"]);
+	});
+
+	it("enabledModels 格式不对时照样写入默认模型，不动这个列表", async () => {
+		writeFileSync(settingsFile(), JSON.stringify({ enabledModels: "cpa/a" }));
+		expect((await call("/api/setDefaultModel", { name: "relay", id: "model-x" })).status).toBe(200);
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ enabledModels: "cpa/a", defaultProvider: "relay", defaultModel: "model-x" });
+	});
+
+	it("没启用的模型和停用的服务不能设为默认", async () => {
+		expect((await call("/api/setDefaultModel", { name: "relay", id: "other" })).status).toBe(400);
+		await call("/api/setServiceDisabled", { name: "relay", disabled: true });
+		expect((await call("/api/setDefaultModel", { name: "relay", id: "model-x" })).status).toBe(400);
+		expect(existsSync(settingsFile())).toBe(false);
+	});
+
+	it("settings.json 损坏时拒绝写入，不覆盖文件", async () => {
+		writeFileSync(settingsFile(), "{ broken");
+		const response = await call("/api/setDefaultModel", { name: "relay", id: "model-x" });
+		expect(response.status).toBeGreaterThanOrEqual(400);
+		expect(readFileSync(settingsFile(), "utf8")).toBe("{ broken");
 	});
 });
 

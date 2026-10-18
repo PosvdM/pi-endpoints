@@ -12,6 +12,7 @@
 | `src/builtin.ts` | 在 pi 自带的模型目录里按名字查模型，判断模型原厂。 |
 | `src/resolve.ts` | 把目录、pi 自带目录和手动设置合并成 pi 的模型配置，记录每个值的来源；选择协议；生成 `thinkingLevelMap`。 |
 | `src/betas.ts` | 决定 Anthropic 协议的模型要追加哪些 beta，并在请求体上追加。 |
+| `src/defaults.ts` | 用 pi 的 `SettingsManager` 读写 pi 的默认模型。 |
 | `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、修改配置。 |
 | `src/commands.ts` | `/endpoints` 命令：启动管理页并打开浏览器。插件只有这一个命令，所有操作都在管理页里完成。 |
 | `src/web/server.ts` | 管理页的 HTTP 服务和接口。 |
@@ -176,6 +177,17 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - 没有密钥时不注册。pi 本身允许注册，但会让用户去 `/login` 输入密钥，和本插件的密钥管理冲突。
 - 已启用但目录里没有的模型仍然注册，用 pi 自带目录和默认值补齐参数。读过目录后，这类模型在管理页里标为"目录里没有"；还没读过目录时不标。
 
+## pi 默认模型
+
+管理页的星标读写的是 pi 自己的设置：`~/.pi/agent/settings.json` 里的 `defaultProvider` 和 `defaultModel`。`src/defaults.ts` 用 pi 导出的 `SettingsManager` 写入，效果和在 pi 的 `/model` 里按 Ctrl+S 相同：
+
+- `SettingsManager` 写文件时加锁，只合并改动的字段，不会覆盖其他 pi 进程或 pi-sync 同时写入的设置。
+- 设置了 `enabledModels`（Ctrl+P 轮换列表）时，pi 会把新的默认模型加进去，这里也照做。pi 先按展开后的模型判断是否已在列表里，这里只比对完整的模型名，列表里的通配符已经覆盖这个模型时会多加一条。要不要加先算好再写，列表格式不对时不会只写了一半。
+- `settings.json` 读不了时，`SettingsManager` 不写文件，只把错误记下来，`open()` 先检查加载错误并拒绝写入。
+- 用 `projectTrusted: false` 打开，不读当前目录的 `.pi/settings.json`。写入只写全局设置，读取也只读全局设置，页面上的星标才和刚写入的值一致；项目设置的 `enabledModels` 也不会被合并进全局列表。项目设置里的 `defaultModel` 在那个目录里仍然优先，页面不显示它。
+
+只有已启用、并且服务已注册到 pi 的模型才能设为默认，否则 pi 启动时找不到它，会改用别的模型。开着的 pi 在内存里保留旧的设置，运行 `/reload` 后才读到新的默认模型。
+
 ## 管理页
 
 `startWebUI()` 在 `127.0.0.1` 的随机端口启动 HTTP 服务。`/endpoints` 保存的是启动用的 Promise，连按两次也只启动一个服务器。`session_shutdown`（退出、`/reload`、`/new`、`/resume`、`/fork`）时关闭。防护措施：
@@ -214,7 +226,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `catalog.test.ts`：目录解析、合并和请求顺序，用 `vi.stubGlobal("fetch")` 模拟服务端。
 - `resolve.test.ts`：参数分层、思考档位、协议选择、compat、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录。
 - `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple` 发出的真实请求里，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
-- `web.test.ts`：管理页的 token、Host 和 JSON 检查，以及各项操作。
+- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作，以及写入 pi 默认模型时保留其他设置、拒绝写入损坏的 `settings.json`。
 
 `test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。
 
