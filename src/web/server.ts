@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { withBetas } from "../betas.ts";
+import { readDefaultModel, writeDefaultModel } from "../defaults.ts";
 import type { ModelOverride, ServiceConfig } from "../config.ts";
 import { describeError, type Endpoints } from "../endpoints.ts";
 import { type ResolvedModel, SUPPORTED_APIS, supportedLevels, toProviderModel } from "../resolve.ts";
@@ -169,6 +170,14 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 		case "setServiceDisabled":
 			endpoints.setServiceDisabled(str(body.name, "name"), body.disabled === true);
 			return undefined;
+		case "setDefaultModel": {
+			const name = str(body.name, "name");
+			const id = str(body.id, "id");
+			if (!endpoints.service(name)?.enabled.includes(id)) throw new HttpError(400, "先启用这个模型");
+			if (!endpoints.status().find((status) => status.name === name)?.registered) throw new HttpError(400, `服务 ${name} 没有注册到 pi`);
+			await writeDefaultModel(name, id);
+			return undefined;
+		}
 		case "setEnabled":
 			endpoints.setEnabled(str(body.name, "name"), str(body.id, "id"), body.enabled === true);
 			return undefined;
@@ -225,6 +234,7 @@ function state(endpoints: Endpoints) {
 	return {
 		apis: SUPPORTED_APIS,
 		loadError: endpoints.loadError,
+		defaultModel: readDefaultModel(),
 		services: endpoints.config.services.map((service) => {
 			const catalog = endpoints.catalog(service.name);
 			return {
