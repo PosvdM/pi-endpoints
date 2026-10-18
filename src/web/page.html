@@ -268,6 +268,9 @@ function byPrefix(a, b) {
 let error = null;
 let toastTimer;
 let serviceDraft = null; // 服务表单里还没保存的内容：{ key: 服务名，新建时为 "", nameTouched, values }
+const refreshing = new Set(); // 正在刷新目录的服务名
+let stale = false; // 后台刷新改了 state，还没重画
+let pointerDown = false;
 
 const $ = (sel, root = document) => root.querySelector(sel);
 function h(tag, attrs = {}, ...children) {
@@ -328,6 +331,39 @@ async function run(path, body, okText) {
 		// 详情面板盖住了页面顶部的错误提示，在面板里也显示一份。
 		$("#drawer-error")?.replaceChildren(h("div", { class: "banner err" }, failure.message));
 		return undefined;
+	}
+}
+
+// 文字输入框有焦点时不重画：重画会让它失去焦点，还会清掉没保存的密钥。
+const typing = () => document.activeElement?.matches("textarea, select, input:not([type=checkbox]):not([type=radio])") ?? false;
+
+// 后台刷新的结果等到没在输入、也没按着鼠标时再画，免得点击落在被替换掉的元素上。
+function flush() {
+	if (!stale || pointerDown || typing()) return;
+	stale = false;
+	render();
+	refreshDrawerStar();
+}
+document.addEventListener("pointerdown", () => { pointerDown = true; }, true);
+// 等这次点击处理完再画。
+document.addEventListener("pointerup", () => { pointerDown = false; setTimeout(flush); }, true);
+document.addEventListener("focusout", () => setTimeout(flush));
+
+/** 在后台刷新目录，用在打开页面和重新启用服务时。失败原因记在服务状态里，不弹顶部提示。 */
+async function refreshInBackground(name) {
+	if (refreshing.has(name)) return;
+	refreshing.add(name);
+	stale = true;
+	flush();
+	try {
+		const data = await api("refresh", { name });
+		if (data.services) state = data;
+	} catch {
+		// 连不上管理页本身（如 pi 已退出）时不打扰，手动刷新会显示原因。
+	} finally {
+		refreshing.delete(name);
+		stale = true;
+		flush();
 	}
 }
 
@@ -394,7 +430,10 @@ function renderNav() {
 				h("div", { class: "sub" }, item.status?.disabled ? "已停用" : `${item.models.filter((model) => model.enabled).length} 个已启用`),
 			),
 			h("input", { type: "checkbox", class: "switch", title: item.status?.disabled ? "启用服务" : "停用服务", checked: item.status?.disabled ? undefined : true, onclick: (event) => event.stopPropagation(), onchange: async (event) => {
-				if (!(await run("setServiceDisabled", { name: item.name, disabled: !event.target.checked }))) event.target.checked = !event.target.checked;
+				const disabled = !event.target.checked;
+				if (!(await run("setServiceDisabled", { name: item.name, disabled }))) event.target.checked = !event.target.checked;
+				// 停用期间服务端的模型可能变了，重新启用时刷新一次。
+				else if (!disabled && item.status?.keySource) refreshInBackground(item.name);
 			} }),
 		);
 	$("#services").replaceChildren(...on.map(row), ...(on.length && off.length ? [h("div", { class: "svc-sep", role: "separator" })] : []), ...off.map(row));
@@ -407,11 +446,17 @@ function renderHead(item) {
 	const pill = status?.disabled ? h("span", { class: "pill" }, "已停用") : status?.error ? h("span", { class: "pill err" }, "有错误") : status?.registered ? h("span", { class: "pill on" }, "已注册到 pi") : h("span", { class: "pill" }, "未注册");
 	const key = status?.keySource === "env" ? `密钥来自环境变量 ${item.apiKeyEnv}` : status?.keySource === "file" ? "密钥已设置" : "未设置密钥";
 	const catalog = item.catalog ? `目录 ${item.catalog.size} 个模型 · ${new Date(item.catalog.fetchedAt).toLocaleString()} 刷新` : "还没有读取过目录";
-	const refresh = h("button", { class: "btn", onclick: async () => {
-		refresh.disabled = true;
-		refresh.textContent = "刷新中…";
-		await run("refresh", { name: item.name }, "目录已刷新");
-	} }, "刷新目录");
+	const busy = refreshing.has(item.name);
+	const refresh = h("button", { class: "btn", disabled: busy, onclick: async () => {
+		refreshing.add(item.name);
+		render();
+		try {
+			await run("refresh", { name: item.name }, "目录已刷新");
+		} finally {
+			refreshing.delete(item.name);
+			render();
+		}
+	} }, busy ? "刷新中…" : "刷新目录");
 	return h("div", { class: "head" },
 		h("div", { class: "info" },
 			h("h1", {}, item.displayName || item.name, pill),
@@ -875,6 +920,8 @@ api("state").then((data) => {
 	state = data;
 	current = firstService();
 	render();
+	// 缓存可能已经过时，比如在服务端停用了模型，所以打开页面时在后台刷新一次。
+	for (const item of state.services) if (!item.status?.disabled && item.status?.keySource) refreshInBackground(item.name);
 }).catch((failure) => {
 	$("#content").replaceChildren(h("div", { class: "banner err" }, `${failure.message}。请在 pi 里重新运行 /endpoints。`));
 });
