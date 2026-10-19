@@ -9,6 +9,7 @@ import { clearDefaultModel, readDefaultModel, writeDefaultModel } from "../defau
 import type { ModelOverride, ServiceConfig } from "../config.ts";
 import { describeError, type Endpoints } from "../endpoints.ts";
 import { type ResolvedModel, SUPPORTED_APIS, supportedLevels, toProviderModel } from "../resolve.ts";
+import { checkUpdate, VERSION } from "../version.ts";
 
 export interface WebUI {
 	url: string;
@@ -87,6 +88,11 @@ async function handle(endpoints: Endpoints, token: string, request: IncomingMess
 
 	if (request.method === "GET" && url.pathname === "/api/state") {
 		sendJson(response, 200, state(endpoints));
+		return;
+	}
+	// 查询 npm 可能要等几秒，所以和状态分开，页面拿到状态后再单独请求。
+	if (request.method === "GET" && url.pathname === "/api/update") {
+		sendJson(response, 200, await checkUpdate());
 		return;
 	}
 	if (request.method !== "POST") throw new HttpError(405, "只接受 POST");
@@ -235,6 +241,7 @@ function modelView(model: ResolvedModel, service: ServiceConfig) {
 function state(endpoints: Endpoints) {
 	const statuses = new Map(endpoints.status().map((status) => [status.name, status]));
 	return {
+		version: VERSION,
 		apis: SUPPORTED_APIS,
 		loadError: endpoints.loadError,
 		defaultModel: readDefaultModel(),

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Endpoints } from "../src/endpoints.ts";
 import { startWebUI, type WebUI } from "../src/web/server.ts";
+import { checkUpdate, isNewer, resetUpdateCheckForTest, VERSION } from "../src/version.ts";
 import { fakePi, useTempAgentDir } from "./helpers.ts";
 
 let temp: ReturnType<typeof useTempAgentDir>;
@@ -14,6 +15,7 @@ let token: string;
 const realFetch = globalThis.fetch;
 
 beforeEach(async () => {
+	resetUpdateCheckForTest();
 	temp = useTempAgentDir();
 	endpoints = new Endpoints(fakePi().pi);
 	web = await startWebUI(endpoints);
@@ -214,5 +216,79 @@ describe("token 比较", () => {
 	it("长度相同但含非 ASCII 字符的 token 返回 403", async () => {
 		const fake = "é".repeat(token.length);
 		expect((await call("/api/state", undefined, { "x-endpoints-token": fake })).status).toBe(403);
+	});
+});
+
+describe("版本号和更新检查", () => {
+	const registry = (version: string) => {
+		const seen: string[] = [];
+		vi.stubGlobal("fetch", async (url: string) => {
+			seen.push(url);
+			return new Response(JSON.stringify({ name: "pi-endpoints", version }));
+		});
+		return seen;
+	};
+
+	it("按数字逐段比较版本号", () => {
+		expect(isNewer("0.2.11", "0.2.12")).toBe(true);
+		expect(isNewer("0.2.9", "0.2.10")).toBe(true);
+		expect(isNewer("0.2.11", "0.3")).toBe(true);
+		expect(isNewer("0.2.11", "0.2.11")).toBe(false);
+		expect(isNewer("0.3.0", "0.2.12")).toBe(false);
+		expect(isNewer("0.2.11", "0.3.0-beta.1")).toBe(false);
+		expect(isNewer("dev", "0.3.0")).toBe(false);
+	});
+
+	it("状态里带上 package.json 的版本号", async () => {
+		const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+		expect(VERSION).toBe(pkg.version);
+		expect((await (await call("/api/state")).json()).version).toBe(pkg.version);
+	});
+
+	it("npm 上有新版时返回版本号和 Release 页面", async () => {
+		const seen = registry("999.0.0");
+		expect(await (await call("/api/update")).json()).toEqual({
+			latestVersion: "999.0.0",
+			releaseUrl: "https://github.com/PosvdM/pi-endpoints/releases/tag/v999.0.0",
+		});
+		expect(seen).toEqual(["https://registry.npmjs.org/pi-endpoints/latest"]);
+	});
+
+	it("已是最新版时什么都不返回", async () => {
+		registry(VERSION);
+		expect(await (await call("/api/update")).json()).toEqual({});
+	});
+
+	it("结果缓存 6 小时", async () => {
+		const seen = registry("1.0.0");
+		const start = Date.now();
+		expect(await checkUpdate("0.1.0", start)).toMatchObject({ latestVersion: "1.0.0" });
+		await checkUpdate("0.1.0", start + 5 * 60 * 60 * 1000);
+		expect(seen).toHaveLength(1);
+		await checkUpdate("0.1.0", start + 6 * 60 * 60 * 1000);
+		expect(seen).toHaveLength(2);
+	});
+
+	it("检查失败时不显示，30 分钟后再试", async () => {
+		let calls = 0;
+		vi.stubGlobal("fetch", async () => {
+			calls++;
+			throw new Error("offline");
+		});
+		const start = Date.now();
+		expect(await checkUpdate("0.1.0", start)).toEqual({});
+		expect(await checkUpdate("0.1.0", start + 29 * 60 * 1000)).toEqual({});
+		expect(calls).toBe(1);
+		vi.stubGlobal("fetch", async () => new Response("bad gateway", { status: 502 }));
+		expect(await checkUpdate("0.1.0", start + 30 * 60 * 1000)).toEqual({});
+		expect(await (await call("/api/update")).json()).toEqual({});
+	});
+
+	it("失败时沿用上次查到的新版本", async () => {
+		registry("1.0.0");
+		const start = Date.now();
+		await checkUpdate("0.1.0", start);
+		vi.stubGlobal("fetch", async () => new Response("", { status: 500 }));
+		expect(await checkUpdate("0.1.0", start + 7 * 60 * 60 * 1000)).toMatchObject({ latestVersion: "1.0.0" });
 	});
 });

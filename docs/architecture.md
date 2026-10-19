@@ -15,6 +15,7 @@
 | `src/defaults.ts` | 用 pi 的 `SettingsManager` 读写 pi 的默认模型。 |
 | `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、修改配置。 |
 | `src/commands.ts` | `/endpoints` 命令：启动管理页并打开浏览器。插件只有这一个命令，所有操作都在管理页里完成。 |
+| `src/version.ts` | 插件版本号，以及到 npm 检查有没有新版本。 |
 | `src/web/server.ts` | 管理页的 HTTP 服务和接口。 |
 | `src/web/page.html` | 管理页前端，单个 HTML 文件，原生 JS，没有构建步骤。 |
 
@@ -200,7 +201,8 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 接口：
 
-- `GET /api/state` 返回全部状态，包括 `loadError`。
+- `GET /api/state` 返回全部状态，包括 `loadError` 和插件版本 `version`。
+- `GET /api/update` 在 npm 上有新版本时返回 `{ latestVersion, releaseUrl }`，否则返回 `{}`。
 - `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setEnabled`、`setOverride`，成功时返回最新状态，失败时返回 400 和 `{ error }`。
 - `refresh` 总是返回 200 和最新状态；刷新失败时状态里多一个 `refreshError`。
 - `testModel` 返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`。
@@ -209,6 +211,8 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 页面的状态变化后，`render()` 重建整个内容区，包括操作失败时显示错误。服务表单因此把还没保存的内容记在 `serviceDraft` 里，按服务名区分，重建时优先用它；保存成功、切换服务或点"添加服务"时清掉。新增其他会被 `render()` 重建的表单时，也要这样保存输入。打开页面后，以及在左栏重新启用服务后，`refreshInBackground()` 在后台调用 `refresh`，失败原因只显示在服务状态里，不弹顶部提示。这是唯一不由用户操作触发的重画，所以由 `flush()` 把它推迟到没有文字输入框获得焦点、也没有按着鼠标的时候，免得输入框失去焦点、没保存的密钥被清掉，或者点击落在被替换掉的元素上。`refreshing` 记下正在刷新的服务，这些服务的"刷新目录"按钮显示"刷新中…"并且不能点，手动刷新也用它。密钥框只出现在添加服务的表单里，已有服务的密钥在单独的密钥卡片里修改。密钥框用 `type="password"` 加 `autocomplete="one-time-code"`，免得 Chrome 把网站的已存密码填进来：密码框会忽略 `off`，`new-password` 会弹出生成密码。添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随。
 
 模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写），分组和前缀按钮按 `byPrefix()` 排序：`PREFIX_ORDER` 里的前缀按列表顺序排在前面，其余按字母序；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。左栏的服务也这样处理：`parked` 记下页面打开时每个服务是否停用，`serviceGroups()` 按这份记录把服务分成启用和停用两组，组内保持配置文件里的顺序；打开页面后新加的服务按加入时的状态归组。
+
+`src/version.ts` 从包内的 `package.json` 读出 `VERSION`。`checkUpdate()` 读取 `https://registry.npmjs.org/pi-endpoints/latest`，用 `isNewer()` 按数字逐段比较 `x.y.z`，带预发布后缀的版本不比较。成功的结果在进程内缓存 6 小时；失败（超时 10 秒）时沿用上次的结果，30 分钟后再试。查询可能要等几秒，所以页面先用 `/api/state` 渲染，再由 `showVersion()` 单独请求 `/api/update`，有新版时在版本号右边加上指向 GitHub Release 的绿色箭头。
 
 `testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，Anthropic 协议的模型同样经过 `withBetas()`，不设置思考档位，超时 60 秒。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。
 
@@ -226,7 +230,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `catalog.test.ts`：目录解析、合并和请求顺序，用 `vi.stubGlobal("fetch")` 模拟服务端。
 - `resolve.test.ts`：参数分层、思考档位、协议选择、compat、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录。
 - `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple` 发出的真实请求里，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
-- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作，以及写入 pi 默认模型时保留其他设置、拒绝写入损坏的 `settings.json`。
+- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作，写入 pi 默认模型时保留其他设置、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
 
 `test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。
 
