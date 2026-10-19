@@ -127,6 +127,10 @@ tr.group b { color: var(--text); font-weight: 600; font-size: 12.5px; margin-rig
 .chip.active { background: var(--text); border-color: var(--text); color: var(--panel); }
 .chip .n { margin-left: 5px; opacity: .65; font-family: system-ui, sans-serif; }
 .model-id { font: 500 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; }
+/* id 过长时只截断 id 本身，星标和标签留在行内可见。 */
+td .model-id { display: flex; align-items: center; }
+td .model-id > .id { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+td .model-id > :not(.id) { flex: none; }
 .model-name { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .num { font-variant-numeric: tabular-nums; }
 .val { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
@@ -615,7 +619,7 @@ function modelRow(item, model) {
 	} },
 		h("td", { class: "toggle" }, h("input", { type: "checkbox", class: "switch", title: model.enabled ? "已启用" : "未启用", checked: model.enabled || undefined, onchange: (event) => run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }) })),
 		h("td", { title: `${model.id}\n${model.name.value}` },
-			h("div", { class: "model-id" }, model.id, star(item, model),
+			h("div", { class: "model-id" }, h("span", { class: "id" }, model.id), star(item, model),
 				model.hidden ? h("span", { class: "tag" }, "隐藏") : null,
 				model.missing ? h("span", { class: "tag warn" }, "目录里没有") : null,
 				needsFix ? h("span", { class: "tag warn" }, "缺参数") : null,
