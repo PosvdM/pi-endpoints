@@ -135,10 +135,13 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 ### compat
 
-- 从原厂在 pi 自带目录里的同名条目抄。
+- 手动 `override.compat` 存在时，整体替换抄来的设置；未设置时，从原厂在 pi 自带目录里的同名条目抄。
 - GPT 模型在 ChatGPT 订阅类服务上（`Catalog.codex` 为真，或 `owned_by` 为 `codex`）改抄 `openai-codex` 的条目。官方 `openai` 条目里的 `supportsStrictMode`、`supportsExplicitPromptCacheMode` 等是官方 API 的能力，订阅版没有。
 - 只有原厂条目的协议和模型实际使用的协议属于同一族时才抄（`openai-codex-responses`、`azure-openai-responses` 和 `openai-responses` 算同一族）。例如手动把 Claude 改成走 `openai-completions` 后，Anthropic 的 compat 不再适用。
-- 模型不支持调节思考时，去掉 `forceAdaptiveThinking` 和 `supportsMidConvoEffort`。带着这两个标志，pi 的 Anthropic 实现会忽略 `reasoning: false`，照样发送 adaptive thinking 和 `effort`。
+- 模型不支持调节思考时，从抄来的 compat 中去掉 `forceAdaptiveThinking` 和 `supportsMidConvoEffort`。带着这两个标志，pi 的 Anthropic 实现会忽略 `reasoning: false`，照样发送 adaptive thinking 和 `effort`。
+- 最终协议为 `anthropic-messages` 时，在选出的 compat 上合并 `sendSessionAffinityHeaders: true`，即使 compat 原本不存在或抄来的字段为 `false`，也按此默认值设置；`override.compat.sendSessionAffinityHeaders` 显式设置的值优先，`false` 可以关闭。其他协议不添加这个默认值。合并时创建新对象，不修改手动配置或 pi 自带目录。
+- compat 的整体来源沿用选中的手动或 pi 层；原本没有 compat 时，补入的会话亲和设置标为默认值。管理页在混合来源时显示“手动 + 默认值”或“pi 自带 + 默认值”，每个 compat 标签的悬停提示显示该字段的来源。
+- pi-ai 在请求选项有 `sessionId` 且会话亲和开启时发送 `x-session-affinity: <sessionId>`；`sessionAffinityFormat` 为 `openrouter` 时改用 `x-session-id`。会话 ID 和请求头由 pi 提供，插件不自行生成。
 - 上下文、思考档位等参数不跟着 compat 抄，仍按上面的顺序取值。
 
 在 CLIProxyAPI 上用真实请求验证过的组合：GPT-6 系列抄 `openai-codex` 的 compat 后，工具调用、文件编辑、对话中途换思考档位和换模型都正常；Claude Opus 5.5 抄 `anthropic` 的 compat 后，adaptive thinking 和工具调用正常。
@@ -229,7 +232,7 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 - `catalog.test.ts`：目录解析、合并和请求顺序，用 `vi.stubGlobal("fetch")` 模拟服务端。
 - `resolve.test.ts`：参数分层、思考档位、协议选择、compat、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录。
-- `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple` 发出的真实请求里，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
+- `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple`、由模拟 `fetch` 捕获的请求中，Anthropic 会话亲和头遵守默认值、手动开关和会话 ID 条件，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
 - `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作，写入 pi 默认模型时保留其他设置、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
 
 `test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。

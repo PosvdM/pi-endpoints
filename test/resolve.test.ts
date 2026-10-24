@@ -34,7 +34,7 @@ beforeAll(() => {
 				api: "anthropic-messages",
 				contextWindow: 1000000,
 				cost: cost(4),
-				compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true, supportsStrictTools: true },
+				compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true, supportsStrictTools: true, sendSessionAffinityHeaders: false },
 				thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 			}),
 		],
@@ -172,7 +172,7 @@ describe("resolveModel", () => {
 		const model = resolveModel(service(), { id: "claude-opus-5-5-high", ownedBy: "antigravity", reasoningLevels: [] }, catalog([]));
 		expect(model.reasoning).toEqual({ value: false, source: "server" });
 		expect(model.thinkingLevelMap.value).toBeUndefined();
-		expect(model.compat).toEqual({ value: { supportsStrictTools: true }, source: "pi" });
+		expect(model.compat).toEqual({ value: { supportsStrictTools: true, sendSessionAffinityHeaders: true }, source: "pi" });
 	});
 
 	it("订阅类服务上的 GPT 从 openai-codex 抄 compat，价格仍按官方", () => {
@@ -290,6 +290,49 @@ describe("审查后补充的规则", () => {
 	it("没读过目录时，已启用的模型不标为目录里没有", () => {
 		expect(resolveService(service({ enabled: ["a"] }), undefined)[0].missing).toBe(false);
 	});
+});
+
+describe("会话亲和 compat", () => {
+	it("Anthropic 模型在抄来的 compat 上默认开启会话亲和，不修改 pi 自带条目", () => {
+		const model = resolveModel(service(), { id: "claude-opus-5-5" }, catalog([]));
+		expect(model.compat).toEqual({
+			value: { forceAdaptiveThinking: true, supportsMidConvoEffort: true, supportsStrictTools: true, sendSessionAffinityHeaders: true },
+			source: "pi",
+		});
+		expect(toProviderModel(model).compat).toEqual(model.compat.value);
+		expect(findBuiltin("claude-opus-5-5", "anthropic")?.compat).toMatchObject({ sendSessionAffinityHeaders: false });
+	});
+
+	it("没有 pi 自带 compat 的 Anthropic 模型也默认开启，来源为默认值", () => {
+		const model = resolveModel(service(), { id: "custom-model", nativeEndpoints: ["/v1/messages"] }, catalog([]));
+		expect(model.compat).toEqual({ value: { sendSessionAffinityHeaders: true }, source: "default" });
+		expect(toProviderModel(model).compat).toEqual({ sendSessionAffinityHeaders: true });
+	});
+
+	it.each([
+		{ compat: {}, expected: { sendSessionAffinityHeaders: true } },
+		{ compat: { supportsStrictTools: false }, expected: { supportsStrictTools: false, sendSessionAffinityHeaders: true } },
+		{ compat: { sendSessionAffinityHeaders: false }, expected: { sendSessionAffinityHeaders: false } },
+		{ compat: { sendSessionAffinityHeaders: true }, expected: { sendSessionAffinityHeaders: true } },
+	])("手动 compat 整体替换抄来的设置，并保留显式的会话亲和值：$compat", ({ compat, expected }) => {
+		const original = { ...compat };
+		const svc = service({ overrides: { "claude-opus-5-5": { compat } } });
+		const model = resolveModel(svc, { id: "claude-opus-5-5" }, catalog([]));
+		expect(model.compat).toEqual({ value: expected, source: "manual" });
+		expect(toProviderModel(model).compat).toEqual(expected);
+		expect(model.compat.value).not.toBe(compat);
+		expect(svc.overrides[model.id].compat).toEqual(original);
+	});
+
+	it.each(["openai-completions", "openai-responses", "google-generative-ai", "mistral-conversations"] as const)(
+		"其他协议 %s 不添加会话亲和设置，手动 compat 保持原样",
+		(api) => {
+			const svc = service({ defaultApi: api });
+			expect(resolveModel(svc, { id: "custom-model" }, catalog([])).compat).toEqual({ value: undefined, source: "default" });
+			svc.overrides["custom-model"] = { compat: { supportsStrictMode: false } };
+			expect(resolveModel(svc, { id: "custom-model" }, catalog([])).compat).toEqual({ value: { supportsStrictMode: false }, source: "manual" });
+		},
+	);
 });
 
 describe("Anthropic beta", () => {

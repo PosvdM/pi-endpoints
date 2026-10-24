@@ -149,7 +149,13 @@ describe("管理页的操作", () => {
 			api: { value: "anthropic-messages", source: "manual" },
 			baseUrl: { value: "https://relay.test" },
 			contextWindow: { value: 1000, source: "manual" },
+			compat: { value: { sendSessionAffinityHeaders: true }, source: "default" },
 		});
+
+		state = await (await call("/api/setOverride", {
+			name: "relay", id: "model-x", override: { api: "anthropic-messages", compat: { sendSessionAffinityHeaders: false } },
+		})).json();
+		expect(state.services[0].models[0].compat).toEqual({ value: { sendSessionAffinityHeaders: false }, source: "manual" });
 	});
 
 	it("刷新失败时返回服务端原文", async () => {

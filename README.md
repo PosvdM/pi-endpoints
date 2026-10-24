@@ -54,8 +54,14 @@ pi install npm:pi-endpoints
 
 另外两项不从服务端读取：
 
-- **compat**（协议兼容设置）：按模型原厂从 pi 自带目录里同名模型抄过来。背后是 ChatGPT 订阅的服务上的 GPT 模型，抄订阅版 `openai-codex` 的设置。
+- **compat**（协议兼容设置）：按模型原厂从 pi 自带目录里同名模型抄过来。背后是 ChatGPT 订阅的服务上的 GPT 模型，抄订阅版 `openai-codex` 的设置。手动填写 compat 时整体替换抄来的设置，Anthropic Messages 的[会话亲和默认值](#会话亲和请求头)单独合并。
 - **价格**：按原厂从 pi 自带目录里抄官方 API 的价格，pi 显示的花费是"相当于官方 API 的花费"。找不到时为 0。
+
+## 会话亲和请求头
+
+Anthropic Messages 协议的模型默认开启 `sendSessionAffinityHeaders`，即使没有抄到 compat 或手动设置中未填写这个字段，也会开启。其他协议不添加这个默认值。
+
+有 pi 会话 ID 时，pi 发送 `x-session-affinity: <会话 ID>`，供 CLIProxyAPI 等服务固定同一会话使用的账号；使用 OpenRouter 格式时请求头为 `x-session-id`。如需关闭，在模型的手动 compat 中设置 `"sendSessionAffinityHeaders": false`。
 
 ## Anthropic 的 beta 请求头
 

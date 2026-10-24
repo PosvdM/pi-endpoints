@@ -274,6 +274,44 @@ describe("Endpoints 的校验和并发", () => {
 	});
 });
 
+describe("Anthropic 会话亲和请求头", () => {
+	it.each([
+		{ affinity: undefined, sessionId: "pi-session", expected: "pi-session" },
+		{ affinity: false, sessionId: "pi-session", expected: null },
+		{ affinity: true, sessionId: "pi-session", expected: "pi-session" },
+		{ affinity: undefined, sessionId: undefined, expected: null },
+	])("按 compat 和会话 ID 发送 x-session-affinity：$affinity / $sessionId", async ({ affinity, sessionId, expected }) => {
+		const { pi, providers } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({
+			name: "cpa",
+			baseUrl: "https://cpa.test",
+			enabled: ["claude-custom"],
+			overrides: affinity === undefined ? {} : { "claude-custom": { compat: { sendSessionAffinityHeaders: affinity } } },
+		});
+		endpoints.setKey("cpa", "k");
+		const provider = providers.get("cpa");
+		const config = provider?.models?.[0];
+		expect(config).toMatchObject({ compat: { sendSessionAffinityHeaders: affinity ?? true } });
+
+		let sent: Headers | undefined;
+		vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+			sent = new Headers(init.headers);
+			return new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "stop" } }), { status: 400 });
+		});
+		const model = { ...config, provider: "cpa" } as never;
+		const stream = provider?.streamSimple?.(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] } as never,
+			{ apiKey: "k", sessionId },
+		);
+		await stream?.result();
+		expect(sent).toBeDefined();
+		expect(sent?.get("x-session-affinity")).toBe(expected);
+		expect(sent?.get("x-session-id")).toBeNull();
+	});
+});
+
 describe("Anthropic beta", () => {
 	it("请求头里的 anthropic-beta 和 1M 上下文 beta 追加到 pi 自己的 beta 列表", async () => {
 		const { pi, providers } = fakePi();

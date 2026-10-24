@@ -224,6 +224,15 @@ export function resolveModel(
 	const thinking = resolveThinking(override, model, builtin, api.value);
 	// 协议和原厂条目不同时（如手动把 Claude 改成走 openai-completions），抄来的 compat 不适用。
 	const compatFrom = compatSource(vendor, model, catalog);
+	const compat: ResolvedModel["compat"] = override?.compat
+		? { value: override.compat, source: "manual" }
+		: compatFrom?.compat && compatFamily(compatFrom.api) === compatFamily(api.value)
+			? { value: copiedCompat(compatFrom.compat as Record<string, unknown>, thinking.reasoning.value), source: "pi" }
+			: { value: undefined, source: "default" };
+	if (api.value === "anthropic-messages") {
+		if (!compat.value) compat.source = "default";
+		compat.value = { ...compat.value, sendSessionAffinityHeaders: override?.compat?.sendSessionAffinityHeaders ?? true };
+	}
 	// 价格一律按官方 API，GPT 也找 openai，不找订阅版。
 	const costFrom = vendor ? findBuiltinIn(vendor, model.id) : undefined;
 	const contextWindow = pick(override?.contextWindow, model.contextWindow, builtin?.contextWindow, DEFAULTS.contextWindow);
@@ -247,11 +256,7 @@ export function resolveModel(
 		input: pick(override?.input, model.input, builtin?.input, ["text"]),
 		reasoning: thinking.reasoning,
 		thinkingLevelMap: thinking.map,
-		compat: override?.compat
-			? { value: override.compat, source: "manual" }
-			: compatFrom?.compat && compatFamily(compatFrom.api) === compatFamily(api.value)
-				? { value: copiedCompat(compatFrom.compat as Record<string, unknown>, thinking.reasoning.value), source: "pi" }
-				: { value: undefined, source: "default" },
+		compat,
 		cost: pick(override?.cost, undefined, costFrom?.cost, ZERO_COST),
 		builtin: builtin ? `${builtin.provider}/${builtin.id}` : undefined,
 	};

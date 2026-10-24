@@ -682,8 +682,13 @@ function overrideForm(item, model) {
 			model.betas.includes(LONG_CONTEXT_BETA) ? h("span", { class: "srctext" }, "上下文超过 200K 时自动申请 1M") : null);
 	}
 	if (model.headers) fact("请求头", h("span", { class: "mono", style: "font-size:12px" }, JSON.stringify(model.headers)));
-	const compatTags = Object.entries(model.compat.value ?? {}).map(([key, value]) => h("span", { class: "tag mono", style: "margin:0" }, value === true ? key : `${key}: ${JSON.stringify(value)}`));
-	fact("compat", ...(compatTags.length ? compatTags : ["无"]), srcText(model.compat.source));
+	const affinityDefault = model.api.value === "anthropic-messages" && o.compat?.sendSessionAffinityHeaders == null;
+	const compatTags = Object.entries(model.compat.value ?? {}).map(([key, value]) => {
+		const source = key === "sendSessionAffinityHeaders" && affinityDefault ? "default" : model.compat.source;
+		return h("span", { class: "tag mono", style: "margin:0", title: `来源：${SOURCE[source]}` }, value === true ? key : `${key}: ${JSON.stringify(value)}`);
+	});
+	const compatSource = affinityDefault && model.compat.source !== "default" ? `${SOURCE[model.compat.source]} + 默认值` : undefined;
+	fact("compat", ...(compatTags.length ? compatTags : ["无"]), srcText(model.compat.source, compatSource));
 	const price = model.cost.value;
 	fact("价格", h("span", { class: "num" }, `输入 $${price.input} · 输出 $${price.output} · 缓存读 $${price.cacheRead} · 缓存写 $${price.cacheWrite}（每百万 token）`), srcText(model.cost.source));
 	if (model.builtin) fact("pi 自带目录", h("span", { class: "mono", style: "font-size:12px" }, model.builtin));
@@ -713,7 +718,7 @@ function overrideForm(item, model) {
 	field("请求头", headers, "Anthropic 协议的 anthropic-beta 会追加到 pi 自己的 beta 列表里");
 	const compat = h("textarea", { class: "input", placeholder: "自动：按原厂从 pi 自带目录抄" });
 	compat.value = o.compat ? JSON.stringify(o.compat, null, 2) : "";
-	field("compat", compat);
+	field("compat", compat, model.api.value === "anthropic-messages" ? "sendSessionAffinityHeaders 默认开启；设为 false 可关闭会话亲和请求头" : null);
 	const cost = h("textarea", { class: "input", placeholder: '每百万 token 的美元价格，例如 {"input": 2, "output": 10}' });
 	cost.value = o.cost ? JSON.stringify(o.cost, null, 2) : "";
 	field("价格", cost);
