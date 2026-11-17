@@ -181,7 +181,7 @@ function trimModel(raw: Json): Json {
 	);
 }
 
-/** 从 v2 完整目录里取出名单上的服务商。一个都没有时说明格式不对。 */
+/** 从 v2 完整目录里取出名单上的服务商。一个模型都没有时说明格式不对。 */
 export function extractModelsDev(body: unknown): ModelsDevFile["providers"] {
 	if (!isObject(body)) throw new Error("models.dev 返回的不是 JSON 对象");
 	const providers: ModelsDevFile["providers"] = {};
@@ -194,7 +194,9 @@ export function extractModelsDev(body: unknown): ModelsDevFile["providers"] {
 				.map(([id, model]) => [id, trimModel(model as Json)]),
 		);
 	}
-	if (!Object.keys(providers).length) throw new Error("models.dev 返回的目录里没有名单上的服务商");
+	if (!Object.values(providers).some((models) => Object.keys(models).length)) {
+		throw new Error("models.dev 返回的目录里没有名单上的服务商的模型");
+	}
 	return providers;
 }
 
@@ -205,12 +207,32 @@ let fetching = false;
 let failedAt: number | undefined;
 let lastError: string | undefined;
 
+const isTimestamp = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+/**
+ * 检查本地文件的结构。服务商或模型的结构不对，或者一个模型都没有时，整份文件当作无效：
+ * 只丢掉坏的部分会留下“有缓存但没有模型”的数据，到期后带着旧 ETag 请求，服务端回 304，数据就一直恢复不了。
+ */
 function validFile(raw: unknown): ModelsDevFile | undefined {
 	if (!isObject(raw) || raw.version !== FILE_VERSION || !isObject(raw.providers)) return undefined;
-	if (typeof raw.fetchedAt !== "number" || typeof raw.checkedAt !== "number") return undefined;
+	if (!isTimestamp(raw.fetchedAt) || !isTimestamp(raw.checkedAt)) return undefined;
 	if (raw.etag !== undefined && typeof raw.etag !== "string") return undefined;
-	const providers = Object.fromEntries(Object.entries(raw.providers).filter(([, models]) => isObject(models)));
-	return { ...(raw as unknown as ModelsDevFile), providers: providers as ModelsDevFile["providers"] };
+	let count = 0;
+	for (const models of Object.values(raw.providers)) {
+		if (!isObject(models)) return undefined;
+		for (const model of Object.values(models)) {
+			if (!isObject(model)) return undefined;
+			count++;
+		}
+	}
+	if (count === 0) return undefined;
+	return {
+		version: FILE_VERSION,
+		etag: raw.etag,
+		fetchedAt: raw.fetchedAt,
+		checkedAt: raw.checkedAt,
+		providers: raw.providers as ModelsDevFile["providers"],
+	};
 }
 
 function setData(next: ModelsDevFile | undefined): void {
@@ -219,11 +241,16 @@ function setData(next: ModelsDevFile | undefined): void {
 }
 
 /**
- * 重新读本地文件，可能同时运行着多个 pi，别的 pi 可能刚拉过。文件损坏或格式版本不对时当作没有。
+ * 重新读本地文件，可能同时运行着多个 pi，别的 pi 可能刚拉过。文件损坏、结构不对或格式版本不对时当作没有。
  * 返回模型数据有没有变化，变化时调用方要重新注册。
  */
 export function loadModelsDev(): boolean {
 	const next = validFile(loadModelsDevFile());
+	// 本进程下载失败后，别的 pi 成功检查过时，清掉旧的失败原因和退避；读到的还是失败前的文件时保留。
+	if (next && failedAt !== undefined && next.checkedAt > failedAt) {
+		failedAt = undefined;
+		lastError = undefined;
+	}
 	if (data && next && data.fetchedAt === next.fetchedAt && data.etag === next.etag) {
 		data.checkedAt = Math.max(data.checkedAt, next.checkedAt);
 		return false;

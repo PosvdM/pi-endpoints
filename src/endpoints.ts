@@ -21,7 +21,7 @@ import {
 	type ServiceConfig,
 } from "./config.ts";
 import { loadModelsDev, updateModelsDev } from "./modelsdev.ts";
-import { isChatModel, PI_LEVELS, type ResolvedModel, resolveService, type Source, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
+import { isChatModel, PI_LEVELS, type ResolvedModel, resolveModel, resolveService, type Source, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
 
 export interface ServiceStatus {
 	name: string;
@@ -338,7 +338,8 @@ export class Endpoints {
 	setEnabled(name: string, id: string, enabled: boolean): void {
 		this.beginChange();
 		const service = this.requireService(name);
-		const model = enabled ? this.models(name).find((item) => item.id === id) : undefined;
+		// 目录里没有、也还没启用的 id 不在 models() 里，按 { id } 单独解析，同样检查类型。
+		const model = enabled ? (this.models(name).find((item) => item.id === id) ?? resolveModel(service, { id }, this.cache[name])) : undefined;
 		if (model && !isChatModel(model)) throw new Error(`${id} 是${typeLabel(model.modelType)}，pi 不能拿它对话`);
 		const set = new Set(service.enabled);
 		if (enabled) set.add(id);

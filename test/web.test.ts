@@ -172,7 +172,7 @@ describe("管理页的操作", () => {
 describe("models.dev 和测试消息", () => {
 	const v2 = {
 		moonshotai: { models: { "dev-chat-9": { limit: { context: 777000 }, capabilities: { reasoning: { supported: true, effort: ["low", "high"] } } } } },
-		typesafe: { models: { "jev-test-1": { type: "decision", limit: { context: 64000 } } } },
+		typesafe: { models: { "jev-test-1": { type: "decision", limit: { context: 64000 } }, "jev-off-catalog": { type: "decision" } } },
 	};
 
 	function stubNetwork(modelsDev: () => Response) {
@@ -220,6 +220,19 @@ describe("models.dev 和测试消息", () => {
 		const response = await call("/api/setEnabled", { name: "relay", id: "jev-test-1", enabled: true });
 		expect(response.status).toBe(400);
 		expect((await response.json()).error).toBe("jev-test-1 是分类模型，pi 不能拿它对话");
+	});
+
+	it("服务目录里没有的非对话模型也不能启用，目录外的对话模型可以", async () => {
+		stubNetwork(() => new Response(JSON.stringify(v2)));
+		await addService();
+		const before = readFileSync(join(temp.dir, "endpoints.json"), "utf8");
+		const response = await call("/api/setEnabled", { name: "relay", id: "jev-off-catalog", enabled: true });
+		expect(response.status).toBe(400);
+		expect((await response.json()).error).toBe("jev-off-catalog 是分类模型，pi 不能拿它对话");
+		expect(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).toBe(before);
+
+		const state = await (await call("/api/setEnabled", { name: "relay", id: "custom-off-catalog", enabled: true })).json();
+		expect(state.services[0].models.find((model: { id: string }) => model.id === "custom-off-catalog")).toMatchObject({ enabled: true, missing: true });
 	});
 
 	it("测试消息可以选思考档位，档位必须是模型可选的", async () => {

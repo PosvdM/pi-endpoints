@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	CHECK_INTERVAL_MS,
 	extractModelsDev,
+	FETCH_TIMEOUT_MS,
 	findModelsDev,
 	loadModelsDev,
 	MODELS_DEV_URL,
@@ -207,14 +208,37 @@ describe("拉取 models.dev", () => {
 		expect(modelsDevStatus().error).toBeUndefined();
 	});
 
-	it("超时、返回内容不是 JSON 时记录原因", async () => {
-		respond = () => {
-			throw new DOMException("timed out", "TimeoutError");
-		};
-		await updateModelsDev();
-		expect(modelsDevStatus().error).toBe("models.dev 在 60 秒内没有响应");
+	it("请求带 60 秒的超时，到时中止并记录原因", async () => {
+		// Node 的 AbortSignal.timeout 不走全局计时器，假计时器管不到，这里换成用 setTimeout 实现的同等信号。
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(new DOMException("timed out", "TimeoutError")), ms);
+			return controller.signal;
+		});
+		let signal: AbortSignal | undefined;
+		vi.stubGlobal("fetch", (_url: string, init?: RequestInit) => {
+			signal = init?.signal ?? undefined;
+			return new Promise<Response>((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal?.reason)));
+		});
+		try {
+			const pending = updateModelsDev();
+			// 读文件之后同步发出请求。
+			expect(signal).toBeDefined();
+			expect(timeout).toHaveBeenCalledWith(FETCH_TIMEOUT_MS);
+			await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS - 1);
+			expect(signal?.aborted).toBe(false);
+			expect(modelsDevStatus().fetching).toBe(true);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(signal?.aborted).toBe(true);
+			expect(await pending).toBe(false);
+			expect(modelsDevStatus()).toMatchObject({ fetching: false, error: "models.dev 在 60 秒内没有响应" });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
-		setModelsDevForTest(undefined);
+	it("返回内容不是 JSON 时记录原因", async () => {
 		respond = () => new Response("<html>");
 		await updateModelsDev();
 		expect(modelsDevStatus().error).toContain("不是 JSON");
@@ -254,6 +278,62 @@ describe("拉取 models.dev", () => {
 		writeFileSync(join(temp.dir, "endpoints-modelsdev.json"), JSON.stringify({ ...file(), checkedAt: now }));
 		expect(await updateModelsDev()).toBe(false);
 		expect(requests).toHaveLength(1);
+	});
+
+	it.each([
+		["服务商不是对象", '{"openai":null}'],
+		["模型不是对象", '{"openai":{"gpt-x":null}}'],
+		["没有服务商", "{}"],
+		["服务商里没有模型", '{"openai":{}}'],
+	])("文件能解析但结构不对（%s）时当作无效，不带旧 ETag 重新下载", async (_label, providers) => {
+		writeFileSync(
+			join(temp.dir, "endpoints-modelsdev.json"),
+			`{"version":1,"etag":"\\"old\\"","fetchedAt":${now},"checkedAt":${now},"providers":${providers}}`,
+		);
+		// 带旧 ETag 时服务端会回 304，空数据就恢复不了。
+		respond = () => (requests.at(-1)?.get("if-none-match") ? new Response(null, { status: 304 }) : ok()());
+		expect(await updateModelsDev()).toBe(true);
+		expect(requests).toHaveLength(1);
+		expect(requests[0].get("if-none-match")).toBeNull();
+		expect(findModelsDev("gpt-x")).toBeDefined();
+		expect(file()).toMatchObject({ etag: '"v1"', fetchedAt: now });
+	});
+
+	it.each([
+		["无穷大", "1e999"],
+		["负数", "-1"],
+		["字符串", '"1"'],
+	])("时间戳是%s时当作无效", async (_label, checkedAt) => {
+		writeFileSync(
+			join(temp.dir, "endpoints-modelsdev.json"),
+			`{"version":1,"etag":"\\"old\\"","fetchedAt":${now},"checkedAt":${checkedAt},"providers":{"openai":{"gpt-x":{}}}}`,
+		);
+		expect(loadModelsDev()).toBe(false);
+		expect(findModelsDev("gpt-x")).toBeUndefined();
+		await updateModelsDev();
+		expect(requests).toHaveLength(1);
+		expect(requests[0].get("if-none-match")).toBeNull();
+	});
+
+	it("本进程下载失败后，别的 pi 成功检查过时清掉失败原因和退避", async () => {
+		await updateModelsDev();
+		now += CHECK_INTERVAL_MS;
+		respond = () => new Response("bad gateway", { status: 502 });
+		await updateModelsDev();
+		expect(modelsDevStatus().error).toContain("502");
+
+		// 读到的还是失败前的文件：保留失败原因，30 分钟内不再试。
+		now += 1;
+		await updateModelsDev();
+		expect(modelsDevStatus().error).toContain("502");
+		expect(requests).toHaveLength(2);
+
+		// 另一个 pi 在失败之后检查成功（回了 304），只更新了检查时间。
+		writeFileSync(join(temp.dir, "endpoints-modelsdev.json"), JSON.stringify({ ...file(), checkedAt: now }));
+		expect(await updateModelsDev()).toBe(false);
+		expect(modelsDevStatus().error).toBeUndefined();
+		expect(modelsDevStatus().checkedAt).toBe(now);
+		expect(requests).toHaveLength(2);
 	});
 
 	it("文件损坏或格式版本不对时当作没有，重新拉取且不带 ETag", async () => {
