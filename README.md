@@ -50,12 +50,13 @@ pi install npm:pi-endpoints
 1. 你在管理页里手动填写的值。
 2. 服务端目录返回的值。CLIProxyAPI 和 Magpie 会返回上下文、最大输出和思考档位，new-api 类中转站一般只返回模型名。
 3. pi 自带的模型目录里同名模型的值。匹配时会去掉 `codex/` 这类前缀，以及日期和 `-high` 这类后缀。这些是官方 API 的参数，可能和走订阅账号的服务不一致。
-4. 保守的默认值：上下文 128000，最大输出 16384，不支持调节思考。
+4. [models.dev](https://models.dev) 目录里同名模型的值，用来补齐 pi 自带目录里没有的模型。只查 OpenAI、Anthropic、Google、DeepSeek 这类模型原厂，不查转卖别家模型的服务商。名单和字段的对应关系见[技术文档](https://github.com/PosvdM/pi-endpoints/blob/main/docs/architecture.md#modelsdev)。
+5. 保守的默认值：上下文 128000，最大输出 16384，不支持调节思考。
 
-另外两项不从服务端读取：
+另外两项的取法不同：
 
-- **compat**（协议兼容设置）：按模型原厂从 pi 自带目录里同名模型抄过来。背后是 ChatGPT 订阅的服务上的 GPT 模型，抄订阅版 `openai-codex` 的设置。手动填写 compat 时整体替换抄来的设置，Anthropic Messages 的[会话亲和默认值](#会话亲和请求头)单独合并。
-- **价格**：按原厂从 pi 自带目录里抄官方 API 的价格，pi 显示的花费是"相当于官方 API 的花费"。找不到时为 0。
+- **compat**（协议兼容设置）：按模型原厂从 pi 自带目录里同名模型抄过来，不从服务端和 models.dev 读取。背后是 ChatGPT 订阅的服务上的 GPT 模型，抄订阅版 `openai-codex` 的设置。手动填写的 compat 逐字段覆盖抄来的设置，没写的字段保留；字段的值写 `null` 表示删掉抄来的这个字段，例如 `{ "supportsStrictTools": null }`。Anthropic Messages 的[会话亲和默认值](#会话亲和请求头)也按这个规则合并。
+- **价格**：先按原厂从 pi 自带目录里抄官方 API 的价格，找不到时用 models.dev 里的价格，都没有时为 0。pi 显示的花费是"相当于官方 API 的花费"。
 
 ## 会话亲和请求头
 
@@ -78,6 +79,7 @@ Anthropic Messages 协议的模型默认开启 `sendSessionAffinityHeaders`，�
 | `endpoints.json` | 服务列表、启用的模型、请求头和手动设置 | 可以。请求头也保存在这里，不要把密钥写进请求头 |
 | `endpoints-auth.json` | 每个服务的密钥。在 macOS 和 Linux 上权限为 600 | 不要同步 |
 | `endpoints-cache.json` | 各服务模型目录的缓存 | 不需要 |
+| `endpoints-modelsdev.json` | 从 models.dev 下载的模型参数，只含名单上的原厂 | 不需要 |
 
 在服务设置里填写"密钥环境变量"（如 `CPA_API_KEY`，只写名字，不带 `$`）后，只要这个环境变量有值，就优先用它作为密钥。适合 CI 这类没有管理页的环境：同步 `endpoints.json`，再设置环境变量即可。
 
@@ -85,7 +87,7 @@ Anthropic Messages 协议的模型默认开启 `sendSessionAffinityHeaders`，�
 
 ## 目录何时刷新
 
-- 启动时用缓存注册模型，不等待网络，服务连不上也能照常启动。
+- 启动时用目录缓存和 models.dev 的本地文件注册模型，不等待网络，服务连不上也能照常启动。
 - 交互模式和 RPC 模式启动后，以及打开 `/model` 时，pi 会刷新已注册服务的目录。
 - 打开管理页时，在后台刷新所有已启用、已设置密钥的服务；在管理页重新启用一个服务时，刷新这个服务。
 - 在管理页点"刷新目录"，会立即刷新这个服务。
@@ -93,11 +95,19 @@ Anthropic Messages 协议的模型默认开启 `sendSessionAffinityHeaders`，�
 
 每次刷新最多等 15 秒。刷新失败时保留上次的缓存，失败原因显示在管理页里。
 
+models.dev 的数据保存在 `endpoints-modelsdev.json`。只有在未停用、已设置密钥的服务里，有模型的上下文、最大输出、输入类型、思考档位或价格要靠 models.dev 或默认值补齐时，才会下载：
+
+- 本地没有数据，或上次检查已超过 24 小时，才会下载。数据没有变化时 models.dev 不重新发送整份目录。
+- pi 刷新目录后在后台下载，不拖慢启动；拿到新数据后重新注册模型。
+- 在管理页刷新目录或添加服务时，接着检查 models.dev，最多等 60 秒。models.dev 下载失败不影响目录刷新，30 分钟后再试。
+- 用 `pi -p` 这类非交互方式运行时不下载，只用本地文件。
+
 ## 限制
 
 - 服务名不能和 pi 自带的服务商同名（如 `openai`、`anthropic`），否则会替换掉 pi 自带的模型。
 - 不支持 Codex 原生协议（`/backend-api/`、Fast 模式、WebSocket）。GPT 模型走服务的 `/v1/responses`。
 - 只有未停用、有已启用模型、并且设置了密钥的服务才会注册到 pi。
+- models.dev 标为分类、图片生成、向量等非对话类型的模型不能启用；之前已启用的保留在配置里，但不注册到 pi。插件不把它们注册成 pi 的分类模型或图片模型。
 
 ## 开发
 

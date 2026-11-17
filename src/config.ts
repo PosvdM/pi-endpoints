@@ -3,8 +3,9 @@ import { dirname, join } from "node:path";
 import type { Api, ModelCost, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Catalog } from "./catalog.ts";
+import type { ModelsDevFile } from "./modelsdev.ts";
 
-/** 单个模型的手动设置。没写的项按服务端目录、pi 自带目录、默认值的顺序取。 */
+/** 单个模型的手动设置。没写的项按服务端目录、pi 自带目录、models.dev、默认值的顺序取。 */
 export interface ModelOverride {
 	name?: string;
 	api?: Api;
@@ -16,6 +17,7 @@ export interface ModelOverride {
 	/** 支持的 pi 思考档位，如 ["low", "medium", "high"]。空数组表示不支持调节思考强度。 */
 	thinkingLevels?: string[];
 	thinkingLevelMap?: ThinkingLevelMap;
+	/** 逐字段覆盖抄来的 compat，值为 null 表示删掉这个字段。 */
 	compat?: Record<string, unknown>;
 	cost?: ModelCost;
 }
@@ -60,6 +62,10 @@ export function cachePath(): string {
 	return join(getAgentDir(), "endpoints-cache.json");
 }
 
+export function modelsDevPath(): string {
+	return join(getAgentDir(), "endpoints-modelsdev.json");
+}
+
 function readJson<T>(path: string, fallback: T): T {
 	if (!existsSync(path)) return fallback;
 	try {
@@ -70,10 +76,11 @@ function readJson<T>(path: string, fallback: T): T {
 }
 
 /** 先写临时文件再改名，避免写到一半时崩溃留下损坏的文件。 */
-function writeJson(path: string, value: unknown, secret = false): void {
+function writeJson(path: string, value: unknown, options: { secret?: boolean; compact?: boolean } = {}): void {
+	const { secret = false, compact = false } = options;
 	mkdirSync(dirname(path), { recursive: true });
 	const tmp = `${path}.${process.pid}.tmp`;
-	writeFileSync(tmp, `${JSON.stringify(value, null, "\t")}\n`, secret ? { mode: 0o600 } : undefined);
+	writeFileSync(tmp, `${JSON.stringify(value, null, compact ? undefined : "\t")}\n`, secret ? { mode: 0o600 } : undefined);
 	renameSync(tmp, path);
 	if (secret && process.platform !== "win32") chmodSync(path, 0o600);
 }
@@ -111,7 +118,7 @@ export function loadAuth(): AuthFile {
 }
 
 export function saveAuth(auth: AuthFile): void {
-	writeJson(authPath(), auth, true);
+	writeJson(authPath(), auth, { secret: true });
 }
 
 export function loadCache(): CacheFile {
@@ -125,6 +132,20 @@ export function loadCache(): CacheFile {
 
 export function saveCache(cache: CacheFile): void {
 	writeJson(cachePath(), cache);
+}
+
+/** 读 models.dev 的本地文件，文件损坏时当作没有。格式由 `modelsdev.ts` 检查。 */
+export function loadModelsDevFile(): unknown {
+	try {
+		return readJson<unknown>(modelsDevPath(), undefined);
+	} catch {
+		return undefined;
+	}
+}
+
+/** 文件只给插件读，不缩进，减小体积。 */
+export function saveModelsDevFile(file: ModelsDevFile, path = modelsDevPath()): void {
+	writeJson(path, file, { compact: true });
 }
 
 export type KeySource = "env" | "file";

@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Endpoints } from "../src/endpoints.ts";
+import { MODELS_DEV_URL, setModelsDevForTest } from "../src/modelsdev.ts";
 import { startWebUI, type WebUI } from "../src/web/server.ts";
 import { checkUpdate, isNewer, resetUpdateCheckForTest, VERSION } from "../src/version.ts";
 import { fakePi, useTempAgentDir } from "./helpers.ts";
@@ -16,6 +17,7 @@ const realFetch = globalThis.fetch;
 
 beforeEach(async () => {
 	resetUpdateCheckForTest();
+	setModelsDevForTest(undefined);
 	temp = useTempAgentDir();
 	endpoints = new Endpoints(fakePi().pi);
 	web = await startWebUI(endpoints);
@@ -164,6 +166,78 @@ describe("管理页的操作", () => {
 		await call("/api/setKey", { name: "relay", apiKey: "sk-1" });
 		const state = await (await call("/api/refresh", { name: "relay" })).json();
 		expect(state.refreshError).toContain("Invalid token");
+	});
+});
+
+describe("models.dev 和测试消息", () => {
+	const v2 = {
+		moonshotai: { models: { "dev-chat-9": { limit: { context: 777000 }, capabilities: { reasoning: { supported: true, effort: ["low", "high"] } } } } },
+		typesafe: { models: { "jev-test-1": { type: "decision", limit: { context: 64000 } } } },
+	};
+
+	function stubNetwork(modelsDev: () => Response) {
+		const bodies: Record<string, unknown>[] = [];
+		vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+			if (url === MODELS_DEV_URL) return modelsDev();
+			if (url.includes("/v1/models")) {
+				return new Response(
+					JSON.stringify(url.includes("client_version") ? { data: [] } : { data: [{ id: "dev-chat-9", owned_by: "openai" }, { id: "jev-test-1" }] }),
+				);
+			}
+			bodies.push(JSON.parse(String(init?.body)));
+			return new Response(JSON.stringify({ error: { message: "stop" } }), { status: 400 });
+		});
+		return bodies;
+	}
+
+	async function addService() {
+		return (await call("/api/saveService", { apiKey: "sk-1", service: { name: "relay", baseUrl: "https://relay.test" } })).json();
+	}
+
+	it("刷新目录后等 models.dev 拉完再返回状态", async () => {
+		stubNetwork(() => new Response(JSON.stringify(v2), { headers: { ETag: '"e"' } }));
+		const state = await addService();
+		expect(state.refreshError).toBeUndefined();
+		expect(state.modelsDev).toMatchObject({ fetching: false, fetchedAt: expect.any(Number), checkedAt: expect.any(Number) });
+		const [chat, jev] = state.services[0].models;
+		expect(chat).toMatchObject({ modelsDev: "moonshotai/dev-chat-9", modelType: "chat", contextWindow: { value: 777000, source: "modelsdev" } });
+		expect(chat.compatSources).toEqual({});
+		expect(jev).toMatchObject({ hidden: true, modelType: "decision" });
+	});
+
+	it("models.dev 失败不算刷新失败，原因记在 modelsDev.error", async () => {
+		stubNetwork(() => new Response("busy", { status: 503 }));
+		await addService();
+		const state = await (await call("/api/refresh", { name: "relay" })).json();
+		expect(state.refreshError).toBeUndefined();
+		expect(state.modelsDev.error).toContain("503");
+		expect(state.services[0].models[0].contextWindow.source).toBe("default");
+	});
+
+	it("不是对话模型的不能启用", async () => {
+		stubNetwork(() => new Response(JSON.stringify(v2)));
+		await addService();
+		const response = await call("/api/setEnabled", { name: "relay", id: "jev-test-1", enabled: true });
+		expect(response.status).toBe(400);
+		expect((await response.json()).error).toBe("jev-test-1 是分类模型，pi 不能拿它对话");
+	});
+
+	it("测试消息可以选思考档位，档位必须是模型可选的", async () => {
+		const bodies = stubNetwork(() => new Response(JSON.stringify(v2)));
+		await addService();
+		for (const thinkingLevel of ["off", "max", 3]) {
+			const response = await call("/api/testModel", { name: "relay", id: "dev-chat-9", thinkingLevel });
+			expect(response.status).toBe(400);
+		}
+		expect(bodies).toHaveLength(0);
+
+		const { test } = await (await call("/api/testModel", { name: "relay", id: "dev-chat-9", thinkingLevel: "high" })).json();
+		expect(test.request).toMatchObject({ api: "openai-responses", id: "dev-chat-9", thinkingLevel: "high" });
+		expect(bodies[0].reasoning).toMatchObject({ effort: "high" });
+
+		const plain = await (await call("/api/testModel", { name: "relay", id: "dev-chat-9" })).json();
+		expect(plain.test.request.thinkingLevel).toBeUndefined();
+		expect(bodies[1].reasoning).toBeUndefined();
 	});
 });
 

@@ -20,7 +20,8 @@ import {
 	saveConfig,
 	type ServiceConfig,
 } from "./config.ts";
-import { PI_LEVELS, type ResolvedModel, resolveService, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
+import { loadModelsDev, updateModelsDev } from "./modelsdev.ts";
+import { isChatModel, PI_LEVELS, type ResolvedModel, resolveService, type Source, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
 
 export interface ServiceStatus {
 	name: string;
@@ -57,10 +58,14 @@ export class Endpoints {
 	private registered = new Set<string>();
 	/** 每个已注册服务里各模型的附加 Anthropic beta，注册和刷新目录时更新。 */
 	private betas = new Map<string, Map<string, string[]>>();
+	/** 正在进行的 models.dev 更新，并发的调用共用它，拿到新数据后只重新注册一次。 */
+	private modelsDevTask?: Promise<void>;
 	private readonly pi: ExtensionAPI;
 
 	constructor(pi: ExtensionAPI) {
 		this.pi = pi;
+		// 启动时只读本地文件，不访问网络。
+		loadModelsDev();
 		try {
 			this.reload();
 		} catch (error) {
@@ -144,8 +149,16 @@ export class Endpoints {
 				streamSimpleAnthropic(model as Model<"anthropic-messages">, context, withBetas(options, this.betas.get(name)?.get(model.id) ?? [])),
 			models: this.piModels(name, models),
 			// 交互模式和 RPC 模式启动后、打开 /model 时，pi 会调用它刷新目录。
+			// 重新注册时 pi 会以 allowNetwork: false 再调用一次，这时不刷新，也就不会再触发 models.dev 更新。
 			refreshModels: async (context) => {
-				if (context.allowNetwork) await this.refresh(name, context.signal);
+				if (context.allowNetwork) {
+					try {
+						await this.refresh(name, context.signal);
+					} finally {
+						// 在后台更新 models.dev，不拖慢启动。拿到新数据后会重新注册所有服务。
+						void this.updateModelsDev();
+					}
+				}
 				const current = this.service(name);
 				return current ? this.piModels(name, this.enabledModels(current)) : [];
 			},
@@ -158,8 +171,37 @@ export class Endpoints {
 		return models.map(toPiModel);
 	}
 
+	/** 已启用的对话模型。models.dev 标为其他类型的模型即使已启用也不注册。 */
 	private enabledModels(service: ServiceConfig): ResolvedModel[] {
-		return this.models(service.name).filter((model) => service.enabled.includes(model.id));
+		return this.models(service.name).filter((model) => service.enabled.includes(model.id) && isChatModel(model));
+	}
+
+	/**
+	 * 在没停用、有密钥的服务里，有模型的上下文、最大输出、输入、思考或价格取自 models.dev 或默认值时，
+	 * 才需要 models.dev 的数据。
+	 */
+	needsModelsDev(): boolean {
+		return this.config.services.some(
+			(service) => !service.disabled && resolveKey(service, this.auth) && this.models(service.name).some(usesFallback),
+		);
+	}
+
+	/**
+	 * 需要时更新 models.dev，拿到新数据后重新注册所有服务。不会失败，原因记在 `modelsDevStatus().error`。
+	 * 是否到期（24 小时、失败后 30 分钟）由 `updateModelsDev()` 判断。
+	 */
+	updateModelsDev(): Promise<void> {
+		if (this.modelsDevTask) return this.modelsDevTask;
+		if (!this.needsModelsDev()) return Promise.resolve();
+		this.modelsDevTask = updateModelsDev()
+			.then((changed) => {
+				if (changed) this.registerAll();
+			})
+			.catch(() => {})
+			.finally(() => {
+				this.modelsDevTask = undefined;
+			});
+		return this.modelsDevTask;
 	}
 
 	/** 刷新一个服务的目录并写缓存，失败时保留旧缓存。不负责重新注册。 */
@@ -296,6 +338,8 @@ export class Endpoints {
 	setEnabled(name: string, id: string, enabled: boolean): void {
 		this.beginChange();
 		const service = this.requireService(name);
+		const model = enabled ? this.models(name).find((item) => item.id === id) : undefined;
+		if (model && !isChatModel(model)) throw new Error(`${id} 是${typeLabel(model.modelType)}，pi 不能拿它对话`);
 		const set = new Set(service.enabled);
 		if (enabled) set.add(id);
 		else set.delete(id);
@@ -322,6 +366,30 @@ export class Endpoints {
 		if (!service) throw new Error(`没有名为 ${name} 的服务`);
 		return service;
 	}
+}
+
+const FALLBACK_SOURCES = new Set<Source>(["modelsdev", "default"]);
+
+function usesFallback(model: ResolvedModel): boolean {
+	return [model.contextWindow, model.maxTokens, model.input, model.reasoning, model.cost].some((value) => FALLBACK_SOURCES.has(value.source));
+}
+
+const TYPE_LABELS: Record<string, string> = {
+	decision: "分类模型",
+	image: "图片生成模型",
+	video: "视频生成模型",
+	embedding: "向量模型",
+	reranking: "重排序模型",
+	transcription: "语音识别模型",
+	speech: "语音合成模型",
+	realtime: "实时语音模型",
+	audio: "音频模型",
+	extraction: "信息抽取模型",
+};
+
+/** 管理页报错时用的模型类型名称。 */
+export function typeLabel(type: string | undefined): string {
+	return (type && TYPE_LABELS[type]) ?? `${type} 类型的模型`;
 }
 
 export function validateName(name: string): void {
