@@ -154,7 +154,7 @@ compat 不从 models.dev 取。
 - `Endpoints.needsModelsDev()` 判断是否需要：在没停用、有密钥的服务里，有模型（目录里的全部模型，加上已启用但目录里没有的）的上下文、最大输出、输入、思考或价格当前取自 models.dev 或默认值。不需要时不下载。
 - `Endpoints.updateModelsDev()` 在需要时调用 `updateModelsDev()`，拿到新数据后调用 `registerAll()`。同一个 `Endpoints` 并发调用时共用同一个任务，只重新注册一次。
 - `updateModelsDev()` 先用 `loadModelsDev()` 重新读文件，因为可能同时运行着多个 pi，别的 pi 可能刚下载过；文件里的 `fetchedAt` 或 `etag` 变了就算数据变化。然后判断是否到期：本地没有数据，或上次成功检查超过 24 小时（`CHECK_INTERVAL_MS`）；失败后 30 分钟内（`RETRY_AFTER_MS`）不再试，失败时间只记在进程内。同一进程里同时只发一个请求，并发的调用共用结果。
-- 请求带 `If-None-Match`，超时 60 秒（`FETCH_TIMEOUT_MS`）。回 304 时只更新 `checkedAt`。失败原因记在进程内，成功后清空，`modelsDevStatus()` 把它和时间、`fetching` 一起交给管理页。`updateModelsDev()` 不抛出错误。
+- 请求带 `If-None-Match`，超时 60 秒（`FETCH_TIMEOUT_MS`）。回 304 时只更新 `checkedAt`。失败原因记在进程内，成功后清空；重新读到的文件的 `checkedAt` 晚于本进程的失败时间时，说明别的 pi 在失败之后检查成功过，也清空失败原因和 30 分钟的退避。`modelsDevStatus()` 把失败原因和时间、`fetching` 一起交给管理页。`updateModelsDev()` 不抛出错误。
 - 调用时机见[数据流](#数据流)：pi 调用 `refreshModels` 时在后台进行；管理页刷新时等它完成。插件加载时只读文件，`pi -p` 这类非交互运行不会调用 `refreshModels`，所以只用本地文件。
 
 ### 文件格式
@@ -183,7 +183,7 @@ compat 不从 models.dev 取。
 
 - `fetchedAt` 是最后一次拿到新数据的时间，`checkedAt` 是最后一次成功检查的时间（含 304），都是毫秒时间戳。
 - `providers` 只含名单上的服务商。每个模型保留 v2 目录的结构，只留下映射用得到的字段（`extractModelsDev()` 裁剪），文件约 190 KB。映射在读取时进行，修改映射规则不需要重新下载。
-- 文件不缩进。损坏、缺字段或 `version` 不等于 `FILE_VERSION` 时当作没有数据，下次需要时重新下载，且不带 `If-None-Match`。要保存新的字段时把 `FILE_VERSION` 加一。
+- 文件不缩进。以下情况整份文件当作没有数据，下次需要时重新下载，且不带 `If-None-Match`：JSON 损坏；`version` 不等于 `FILE_VERSION`；`fetchedAt` 或 `checkedAt` 不是有限的非负数；`etag` 不是字符串；某个服务商或模型不是对象；一个模型都没有。只丢掉坏的部分不行：留下的空数据会在到期后带着旧 ETag 请求，服务端回 304，数据就一直恢复不了。下载到的目录里一个名单上的模型都没有时，`extractModelsDev()` 报错，不写文件。要保存新的字段时把 `FILE_VERSION` 加一。
 
 ## 合并参数
 
@@ -213,7 +213,7 @@ compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目
 2. 最终协议为 `anthropic-messages` 时，设置 `sendSessionAffinityHeaders: true`（来源为默认值），即使抄来的字段为 `false`。其他协议不添加这个默认值。
 3. 手动 `override.compat` 逐字段覆盖：值为 `null` 表示删掉这个字段，其他值覆盖。`false` 可以关闭会话亲和。
 
-结果为空对象时为 `undefined`。合并时创建新对象，不修改手动配置或 pi 自带目录。手动 compat 和抄来的值完全一致时，结果和直接使用手动 compat 相同，所以整份写在配置里的手动 compat 不受影响。
+结果为空对象时为 `undefined`。合并时创建新对象，不修改手动配置或 pi 自带目录。手动 compat 写全了抄来的每个字段时，结果和直接使用手动 compat 相同；缺了某个抄来的字段时，这个字段保留抄来的值，要去掉它须把值写成 `null`。
 
 - GPT 模型在 ChatGPT 订阅类服务上（`Catalog.codex` 为真，或 `owned_by` 为 `codex`）改抄 `openai-codex` 的条目。官方 `openai` 条目里的 `supportsStrictMode`、`supportsExplicitPromptCacheMode` 等是官方 API 的能力，订阅版没有。
 - 只有原厂条目的协议和模型实际使用的协议属于同一族时才抄（`openai-codex-responses`、`azure-openai-responses` 和 `openai-responses` 算同一族）。例如手动把 Claude 改成走 `openai-completions` 后，Anthropic 的 compat 不再适用。
@@ -257,15 +257,15 @@ compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目
 - 服务名必须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不能和 pi 自带的服务商同名。用 `registerProvider` 注册同名服务商并提供 `models` 时，会替换掉它全部的自带模型。
 - 停用的服务不注册。
 - 没有密钥时不注册。pi 本身允许注册，但会让用户去 `/login` 输入密钥，和本插件的密钥管理冲突。
-- 已启用但目录里没有的模型仍然注册，用 pi 自带目录、models.dev 和默认值补齐参数。
-- models.dev 标为非 `chat` 类型的模型即使已启用也不注册。服务只启用了这类模型时，按没有启用的模型处理，不注册。读过目录后，这类模型在管理页里标为"目录里没有"；还没读过目录时不标。
+- 已启用但目录里没有的模型仍然注册，用 pi 自带目录、models.dev 和默认值补齐参数。读过目录后，这类模型在管理页里标为"目录里没有"；还没读过目录时不标。
+- models.dev 标为非 `chat` 类型的模型即使已启用也不注册。服务只启用了这类模型时，按没有启用的模型处理，不注册。`setEnabled()` 启用一个模型前总是解析它的类型，目录里没有的 id 按 `{ id }` 解析，所以目录外的非对话模型同样不能启用。
 
 ## pi 默认模型
 
 管理页的星标读写的是 pi 自己的设置：`~/.pi/agent/settings.json` 里的 `defaultProvider` 和 `defaultModel`。`src/defaults.ts` 用 pi 导出的 `SettingsManager` 写入，效果和在 pi 的 `/model` 里按 Ctrl+S 相同：
 
 - `SettingsManager` 写文件时加锁，只合并改动的字段，不会覆盖其他 pi 进程或 pi-sync 同时写入的设置。
-- 设置了 `enabledModels`（Ctrl+P 轮换列表）时，pi 会把新的默认模型加进去，这里也照做。pi 先按展开后的模型判断是否已在列表里，这里只比对完整的模型名，列表里的通配符已经覆盖这个模型时会多加一条。要不要加先算好再写，列表格式不对时不会只写了一半。
+- 设置了 `enabledModels`（Ctrl+P 轮换列表）时，pi 会把新的默认模型加进去，这里也照做。pi 先按展开后的模型判断是否已在列表里，这里只比对完整的模型名，列表里的通配符已经覆盖这个模型时会多加一条。`enabledModels` 不是数组时不改它，照样写入默认模型；数组里不是字符串的项不参与比对。
 - `settings.json` 读不了时，`SettingsManager` 不写文件，只把错误记下来，`open()` 先检查加载错误并拒绝写入。
 - 用 `projectTrusted: false` 打开，不读当前目录的 `.pi/settings.json`。写入只写全局设置，读取也只读全局设置，页面上的星标才和刚写入的值一致；项目设置的 `enabledModels` 也不会被合并进全局列表。项目设置里的 `defaultModel` 在那个目录里仍然优先，页面不显示它。
 
@@ -306,7 +306,7 @@ compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目
 - compat 标签的来源取自 `compatSources`；没有这个字段时按整体来源推算，Anthropic 协议的会话亲和字段没有手动设置时算作默认值。`override.compat` 里值为 `null` 的字段显示为带删除线的标签。
 - 测试消息的档位下拉框列出 `levels` 里除 `off` 以外的档位，选了档位时请求体带 `thinkingLevel`，结果按 `test.request.thinkingLevel` 显示实际发出的档位。
 
-图例旁的 models.dev 状态由 `modelsDevStatus()` 按 `state.modelsDev` 生成：`fetching` 为真时显示正在拉取，有 `error` 时用警告颜色显示原因，否则显示 `fetchedAt`；都没有时不显示。
+图例旁的 models.dev 状态由 `modelsDevStatus()` 按 `state.modelsDev` 生成：`fetching` 为真时显示正在拉取，有 `error` 时用警告颜色显示原因，否则显示 `fetchedAt`；都没有时不显示。页面只在拿到新状态时重画，而 `refresh` 等 models.dev 拉取完成才返回，所以刷新目录时一般看不到“正在拉取”；只有页面拿到的状态正处于拉取中时才显示，例如打开页面时 pi 正在后台拉取。
 
 `src/version.ts` 从包内的 `package.json` 读出 `VERSION`。`checkUpdate()` 读取 `https://registry.npmjs.org/pi-endpoints/latest`，用 `isNewer()` 按数字逐段比较 `x.y.z`，带预发布后缀的版本不比较。成功的结果在进程内缓存 6 小时；失败（超时 10 秒）时沿用上次的结果，30 分钟后再试。查询可能要等几秒，所以页面先用 `/api/state` 渲染，再由 `showVersion()` 单独请求 `/api/update`，有新版时在版本号右边加上指向 GitHub Release 的绿色箭头。
 
