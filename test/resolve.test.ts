@@ -3,7 +3,8 @@ import { type BuiltinModel, candidateIds, findBuiltin, setBuiltinCatalogForTest,
 import type { Catalog } from "../src/catalog.ts";
 import type { ServiceConfig } from "../src/config.ts";
 import { LONG_CONTEXT_BETA } from "../src/betas.ts";
-import { levelsToMap, resolveModel, resolveService, selectApi, supportedLevels, toProviderModel } from "../src/resolve.ts";
+import { setModelsDevForTest } from "../src/modelsdev.ts";
+import { isChatModel, levelsToMap, resolveModel, resolveService, selectApi, supportedLevels, toProviderModel } from "../src/resolve.ts";
 
 const cost = (input: number) => ({ input, output: input * 5, cacheRead: 0, cacheWrite: 0 });
 
@@ -309,19 +310,57 @@ describe("会话亲和 compat", () => {
 		expect(toProviderModel(model).compat).toEqual({ sendSessionAffinityHeaders: true });
 	});
 
+	const copied = { forceAdaptiveThinking: true, supportsMidConvoEffort: true, supportsStrictTools: true };
 	it.each([
-		{ compat: {}, expected: { sendSessionAffinityHeaders: true } },
-		{ compat: { supportsStrictTools: false }, expected: { supportsStrictTools: false, sendSessionAffinityHeaders: true } },
-		{ compat: { sendSessionAffinityHeaders: false }, expected: { sendSessionAffinityHeaders: false } },
-		{ compat: { sendSessionAffinityHeaders: true }, expected: { sendSessionAffinityHeaders: true } },
-	])("手动 compat 整体替换抄来的设置，并保留显式的会话亲和值：$compat", ({ compat, expected }) => {
+		{ compat: {}, expected: { ...copied, sendSessionAffinityHeaders: true }, source: "pi" },
+		{ compat: { supportsStrictTools: false }, expected: { ...copied, supportsStrictTools: false, sendSessionAffinityHeaders: true }, source: "manual" },
+		{ compat: { sendSessionAffinityHeaders: false }, expected: { ...copied, sendSessionAffinityHeaders: false }, source: "manual" },
+		{ compat: { sendSessionAffinityHeaders: true }, expected: { ...copied, sendSessionAffinityHeaders: true }, source: "manual" },
+		{ compat: { forceAdaptiveThinking: null, supportsMidConvoEffort: null }, expected: { supportsStrictTools: true, sendSessionAffinityHeaders: true }, source: "manual" },
+		{ compat: { sendSessionAffinityHeaders: null }, expected: copied, source: "manual" },
+	])("手动 compat 逐字段覆盖抄来的设置，null 删掉字段：$compat", ({ compat, expected, source }) => {
 		const original = { ...compat };
 		const svc = service({ overrides: { "claude-opus-5-5": { compat } } });
 		const model = resolveModel(svc, { id: "claude-opus-5-5" }, catalog([]));
-		expect(model.compat).toEqual({ value: expected, source: "manual" });
+		expect(model.compat).toEqual({ value: expected, source });
 		expect(toProviderModel(model).compat).toEqual(expected);
 		expect(model.compat.value).not.toBe(compat);
 		expect(svc.overrides[model.id].compat).toEqual(original);
+	});
+
+	it("记录每个 compat 字段的来源", () => {
+		const svc = service({ overrides: { "claude-opus-5-5": { compat: { supportsStrictTools: false, forceAdaptiveThinking: null, extra: 1 } } } });
+		expect(resolveModel(svc, { id: "claude-opus-5-5" }, catalog([])).compatSources).toEqual({
+			supportsMidConvoEffort: "pi",
+			supportsStrictTools: "manual",
+			sendSessionAffinityHeaders: "default",
+			extra: "manual",
+		});
+	});
+
+	it("删掉全部字段后 compat 为 undefined", () => {
+		const svc = service({ overrides: { "claude-opus-5-5": { compat: { sendSessionAffinityHeaders: null } } } });
+		const model = resolveModel(svc, { id: "custom-model", nativeEndpoints: ["/v1/messages"] }, catalog([]));
+		expect(model.compat).toEqual({ value: { sendSessionAffinityHeaders: true }, source: "default" });
+		svc.overrides["custom-model"] = { compat: { sendSessionAffinityHeaders: null } };
+		const removed = resolveModel(svc, { id: "custom-model", nativeEndpoints: ["/v1/messages"] }, catalog([]));
+		expect(removed.compat).toEqual({ value: undefined, source: "manual" });
+		expect(removed.compatSources).toEqual({});
+	});
+
+	it.each([
+		{ id: "claude-opus-5-5", api: undefined, compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true, supportsStrictTools: true, sendSessionAffinityHeaders: false } },
+		{ id: "claude-opus-5-5", api: undefined, compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true, supportsStrictTools: true } },
+		{ id: "claude-opus-5-5-high", api: undefined, compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true, supportsStrictTools: true } },
+		{ id: "gpt-6.1-sol", api: undefined, compat: { supportsStrictMode: true, supportsToolSearch: true } },
+		{ id: "gpt-6.1-sol", api: "openai-completions" as const, compat: { supportsStrictMode: false } },
+	])("整份手动 compat（和 pi 自带的一致）合并后结果和整体替换时相同：$id $compat", ({ id, api, compat }) => {
+		// 整体替换时的结果：手动 compat 原样使用，Anthropic 协议再补上会话亲和默认值。
+		const svc = service({ overrides: { [id]: { api, compat } } });
+		const levels = id.endsWith("-high") ? { reasoningLevels: [] } : {};
+		const model = resolveModel(svc, { id, ...levels }, catalog([]));
+		const wholesale = model.api.value === "anthropic-messages" ? { ...compat, sendSessionAffinityHeaders: compat.sendSessionAffinityHeaders ?? true } : compat;
+		expect(model.compat).toEqual({ value: wholesale, source: "manual" });
 	});
 
 	it.each(["openai-completions", "openai-responses", "google-generative-ai", "mistral-conversations"] as const)(
@@ -333,6 +372,106 @@ describe("会话亲和 compat", () => {
 			expect(resolveModel(svc, { id: "custom-model" }, catalog([])).compat).toEqual({ value: { supportsStrictMode: false }, source: "manual" });
 		},
 	);
+});
+
+describe("models.dev 层", () => {
+	const dev = (extra: Record<string, unknown> = {}) => ({
+		name: "Dev Name",
+		limit: { context: 333000, output: 33000 },
+		modalities: { input: ["text", "image/png"] },
+		capabilities: { reasoning: { supported: true, effort: ["low", "high", "xhigh"] } },
+		cost: { text: { input: { price: 3 }, output: { price: 9 } } },
+		...extra,
+	});
+
+	beforeAll(() =>
+		setModelsDevForTest({
+			anthropic: { "claude-opus-5-5": dev({ cost: { text: { input: { price: 99 }, output: { price: 99 } } } }), "claude-haiku-5-5": dev() },
+			deepseek: { "deepseek-v9": dev() },
+			google: { "gemini-9": dev() },
+			moonshotai: {
+				"kimi-auto": dev({ capabilities: { reasoning: { supported: true } } }),
+				"kimi-plain": dev({ capabilities: { reasoning: { supported: false } } }),
+				"kimi-none": dev({ capabilities: { reasoning: { supported: true, effort: ["none"] } } }),
+			},
+			typesafe: { "jev-latest": { type: "decision", name: "Jev Latest", limit: { context: 64000 }, capabilities: { reasoning: { supported: false } } } },
+		}),
+	);
+	afterAll(() => setModelsDevForTest(undefined));
+
+	it("pi 自带目录查不到的值取 models.dev，记下匹配到的条目", () => {
+		const model = resolveModel(service(), { id: "claude-haiku-5-5" }, catalog([]));
+		expect(model.builtin).toBeUndefined();
+		expect(model.modelsDev).toBe("anthropic/claude-haiku-5-5");
+		expect(model.modelType).toBe("chat");
+		expect(model.name).toEqual({ value: "Dev Name", source: "modelsdev" });
+		expect(model.contextWindow).toEqual({ value: 333000, source: "modelsdev" });
+		expect(model.maxTokens).toEqual({ value: 33000, source: "modelsdev" });
+		expect(model.input).toEqual({ value: ["text", "image"], source: "modelsdev" });
+		expect(model.cost).toEqual({ value: { input: 3, output: 9, cacheRead: 0, cacheWrite: 0 }, source: "modelsdev" });
+		// Anthropic 协议去掉 minimal，其余按 levelsToMap 转换。
+		expect(model.thinkingLevelMap.source).toBe("modelsdev");
+		expect(supportedLevels(model.reasoning.value, model.thinkingLevelMap.value)).toEqual(["low", "high", "xhigh"]);
+		// compat 不从 models.dev 取。
+		expect(model.compat).toEqual({ value: { sendSessionAffinityHeaders: true }, source: "default" });
+	});
+
+	it("手动、服务端目录和 pi 自带目录都优先于 models.dev", () => {
+		const fromPi = resolveModel(service(), { id: "claude-opus-5-5" }, catalog([]));
+		expect(fromPi.contextWindow.source).toBe("pi");
+		expect(fromPi.cost).toEqual({ value: cost(4), source: "pi" });
+		expect(fromPi.modelsDev).toBe("anthropic/claude-opus-5-5");
+
+		const fromServer = resolveModel(service(), { id: "claude-haiku-5-5", contextWindow: 200000, reasoningLevels: ["high"] }, catalog([]));
+		expect(fromServer.contextWindow.source).toBe("server");
+		expect(fromServer.reasoning.source).toBe("server");
+		expect(fromServer.maxTokens.source).toBe("modelsdev");
+
+		const manual = service({ overrides: { "claude-haiku-5-5": { maxTokens: 1000, cost: cost(1) } } });
+		const fromManual = resolveModel(manual, { id: "claude-haiku-5-5" }, catalog([]));
+		expect(fromManual.maxTokens.source).toBe("manual");
+		expect(fromManual.cost.source).toBe("manual");
+	});
+
+	it("pi 自带目录里有、但原厂不明拿不到价格时，价格取 models.dev", () => {
+		const model = resolveModel(service(), { id: "deepseek-v9" }, catalog([]));
+		expect(model.contextWindow.source).toBe("pi");
+		expect(model.cost).toEqual({ value: { input: 3, output: 9, cacheRead: 0, cacheWrite: 0 }, source: "modelsdev" });
+	});
+
+	it("名字只在去掉前缀后 id 完全相同时借用", () => {
+		expect(resolveModel(service(), { id: "anthropic/claude-haiku-5-5" }, catalog([])).name.source).toBe("modelsdev");
+		const suffixed = resolveModel(service(), { id: "claude-haiku-5-5-high" }, catalog([]));
+		expect(suffixed.name).toEqual({ value: "claude-haiku-5-5-high", source: "default" });
+		expect(suffixed.contextWindow.source).toBe("modelsdev");
+	});
+
+	it("思考：只写 supported 时交给 pi 的默认档位，不支持时为 false，只剩 none 时不支持调节", () => {
+		const auto = resolveModel(service(), { id: "kimi-auto" }, catalog([]));
+		expect(auto.reasoning).toEqual({ value: true, source: "modelsdev" });
+		expect(auto.thinkingLevelMap).toEqual({ value: undefined, source: "modelsdev" });
+		expect(resolveModel(service(), { id: "kimi-plain" }, catalog([])).reasoning).toEqual({ value: false, source: "modelsdev" });
+		const none = resolveModel(service(), { id: "kimi-none" }, catalog([]));
+		expect(none.reasoning).toEqual({ value: false, source: "modelsdev" });
+		expect(none.thinkingLevelMap.value).toBeUndefined();
+	});
+
+	it("档位按最终协议去掉 pi 发不出去的", () => {
+		const model = resolveModel(service(), { id: "gemini-9" }, catalog([]));
+		expect(model.api.value).toBe("google-generative-ai");
+		expect(supportedLevels(model.reasoning.value, model.thinkingLevelMap.value)).toEqual(["low", "high"]);
+	});
+
+	it("不是 chat 的模型标为隐藏，不算对话模型", () => {
+		const jev = resolveModel(service(), { id: "jev-latest" }, catalog([]));
+		expect(jev).toMatchObject({ hidden: true, modelType: "decision", modelsDev: "typesafe/jev-latest" });
+		expect(isChatModel(jev)).toBe(false);
+		expect(isChatModel(resolveModel(service(), { id: "claude-haiku-5-5" }, catalog([])))).toBe(true);
+		const unknown = resolveModel(service(), { id: "mystery" }, catalog([]));
+		expect(unknown.modelType).toBeUndefined();
+		expect(unknown.modelsDev).toBeUndefined();
+		expect(isChatModel(unknown)).toBe(true);
+	});
 });
 
 describe("Anthropic beta", () => {

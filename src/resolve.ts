@@ -4,9 +4,13 @@ import { splitBetas } from "./betas.ts";
 import { type BuiltinModel, findBuiltin, findBuiltinIn, type Vendor, vendorOf } from "./builtin.ts";
 import type { Catalog, CatalogModel } from "./catalog.ts";
 import { DEFAULT_API, type ModelOverride, type ServiceConfig } from "./config.ts";
+import { findModelsDev, type ModelsDevModel } from "./modelsdev.ts";
 
-/** 每个值来自哪一层：手动设置、服务端目录、pi 自带目录，还是默认值。 */
-export type Source = "manual" | "server" | "pi" | "default";
+/** 每个值来自哪一层：手动设置、服务端目录、pi 自带目录、models.dev，还是默认值。 */
+export type Source = "manual" | "server" | "pi" | "modelsdev" | "default";
+
+/** compat 里每个字段的来源。 */
+export type CompatSource = "manual" | "pi" | "default";
 
 /** 协议来自哪一步判断。 */
 export type ApiSource = "manual" | "native_endpoints" | "owned_by" | "name" | "default";
@@ -19,7 +23,7 @@ export interface Sourced<T, S = Source> {
 export interface ResolvedModel {
 	id: string;
 	ownedBy?: string;
-	/** 服务端标了隐藏，或者看名字是图片生成模型。只影响管理页默认显示不显示。 */
+	/** 服务端标了隐藏、看名字是图片生成模型，或者 models.dev 标的类型不是对话模型。只影响管理页默认显示不显示。 */
 	hidden: boolean;
 	/** 已启用，但服务端目录里没有这个模型。 */
 	missing: boolean;
@@ -36,9 +40,15 @@ export interface ResolvedModel {
 	reasoning: Sourced<boolean>;
 	thinkingLevelMap: Sourced<ThinkingLevelMap | undefined>;
 	compat: Sourced<Record<string, unknown> | undefined>;
+	/** 最终 compat 里每个字段的来源。 */
+	compatSources: Record<string, CompatSource>;
 	cost: Sourced<ModelCost>;
 	/** pi 自带目录里按名字匹配上的条目，没有就是 undefined。 */
 	builtin?: string;
+	/** models.dev 里按名字匹配上的 `<服务商>/<模型 id>`，没有就是 undefined。 */
+	modelsDev?: string;
+	/** models.dev 标的模型类型，没匹配上时为 undefined，按对话模型处理。 */
+	modelType?: string;
 }
 
 type ChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
@@ -143,10 +153,11 @@ export function baseUrlFor(root: string, api: Api): string {
 	}
 }
 
-function pick<T>(manual: T | undefined, server: T | undefined, pi: T | undefined, fallback: T): Sourced<T> {
+function pick<T>(manual: T | undefined, server: T | undefined, pi: T | undefined, modelsDev: T | undefined, fallback: T): Sourced<T> {
 	if (manual !== undefined) return { value: manual, source: "manual" };
 	if (server !== undefined) return { value: server, source: "server" };
 	if (pi !== undefined) return { value: pi, source: "pi" };
+	if (modelsDev !== undefined) return { value: modelsDev, source: "modelsdev" };
 	return { value: fallback, source: "default" };
 }
 
@@ -174,6 +185,7 @@ function resolveThinking(
 	override: ModelOverride | undefined,
 	model: CatalogModel,
 	builtin: BuiltinModel | undefined,
+	dev: ModelsDevModel | undefined,
 	api: Api,
 ): { reasoning: Sourced<boolean>; map: Sourced<ThinkingLevelMap | undefined> } {
 	if (override?.thinkingLevelMap || override?.thinkingLevels) {
@@ -196,6 +208,15 @@ function resolveThinking(
 			map: { value: builtin.reasoning ? builtin.thinkingLevelMap : undefined, source: "pi" },
 		};
 	}
+	if (dev?.reasoning !== undefined) {
+		// 只列了 supported 时交给 pi 的默认档位。toggle 和 budget 不转换，pi 自己生成目录时也不用它们。
+		const map = dev.reasoning && dev.effort ? levelsToMap(dev.effort, api) : undefined;
+		const reasoning = dev.reasoning && (!map || hasThinking(map));
+		return {
+			reasoning: { value: reasoning, source: "modelsdev" },
+			map: { value: reasoning ? map : undefined, source: "modelsdev" },
+		};
+	}
 	return { reasoning: { value: false, source: "default" }, map: { value: undefined, source: "default" } };
 }
 
@@ -205,10 +226,43 @@ function resolveThinking(
  */
 const THINKING_COMPAT = ["forceAdaptiveThinking", "supportsMidConvoEffort"];
 
-function copiedCompat(compat: Record<string, unknown>, reasoning: boolean): Record<string, unknown> | undefined {
+function copiedCompat(compat: Record<string, unknown>, reasoning: boolean): Record<string, unknown> {
 	if (reasoning) return compat;
-	const rest = Object.fromEntries(Object.entries(compat).filter(([key]) => !THINKING_COMPAT.includes(key)));
-	return Object.keys(rest).length ? rest : undefined;
+	return Object.fromEntries(Object.entries(compat).filter(([key]) => !THINKING_COMPAT.includes(key)));
+}
+
+/**
+ * 依次合并：pi 自带目录抄来的部分；Anthropic 协议默认开启会话亲和；手动 compat 逐字段覆盖，
+ * 值为 null 表示删掉这个字段。不修改手动配置和 pi 自带目录里的对象。
+ */
+function resolveCompat(
+	manual: Record<string, unknown> | undefined,
+	copied: Record<string, unknown> | undefined,
+	api: Api,
+): { compat: ResolvedModel["compat"]; sources: Record<string, CompatSource> } {
+	const value: Record<string, unknown> = {};
+	const sources: Record<string, CompatSource> = {};
+	const set = (key: string, item: unknown, source: CompatSource) => {
+		value[key] = item;
+		sources[key] = source;
+	};
+	for (const [key, item] of Object.entries(copied ?? {})) set(key, item, "pi");
+	if (api === "anthropic-messages") set("sendSessionAffinityHeaders", true, "default");
+	for (const [key, item] of Object.entries(manual ?? {})) {
+		if (item === null) {
+			delete value[key];
+			delete sources[key];
+		} else if (item !== undefined) {
+			set(key, item, "manual");
+		}
+	}
+	const source: CompatSource = manual && Object.keys(manual).length ? "manual" : copied && Object.keys(copied).length ? "pi" : "default";
+	return { compat: { value: Object.keys(value).length ? value : undefined, source }, sources };
+}
+
+/** models.dev 标为非 chat 的模型（分类、出图、向量等）pi 不能拿来对话，不注册。 */
+export function isChatModel(model: ResolvedModel): boolean {
+	return model.modelType === undefined || model.modelType === "chat";
 }
 
 export function resolveModel(
@@ -220,31 +274,35 @@ export function resolveModel(
 	const override = service.overrides[model.id];
 	const vendor = vendorOf(model.id, model.ownedBy);
 	const builtin = findBuiltin(model.id, vendor);
+	const dev = findModelsDev(model.id, vendor);
 	const api = selectApi(model, service, override);
-	const thinking = resolveThinking(override, model, builtin, api.value);
+	const thinking = resolveThinking(override, model, builtin, dev, api.value);
 	// 协议和原厂条目不同时（如手动把 Claude 改成走 openai-completions），抄来的 compat 不适用。
 	const compatFrom = compatSource(vendor, model, catalog);
-	const compat: ResolvedModel["compat"] = override?.compat
-		? { value: override.compat, source: "manual" }
-		: compatFrom?.compat && compatFamily(compatFrom.api) === compatFamily(api.value)
-			? { value: copiedCompat(compatFrom.compat as Record<string, unknown>, thinking.reasoning.value), source: "pi" }
-			: { value: undefined, source: "default" };
-	if (api.value === "anthropic-messages") {
-		if (!compat.value) compat.source = "default";
-		compat.value = { ...compat.value, sendSessionAffinityHeaders: override?.compat?.sendSessionAffinityHeaders ?? true };
-	}
+	const copied =
+		compatFrom?.compat && compatFamily(compatFrom.api) === compatFamily(api.value)
+			? copiedCompat(compatFrom.compat as Record<string, unknown>, thinking.reasoning.value)
+			: undefined;
+	const { compat, sources: compatSources } = resolveCompat(override?.compat, copied, api.value);
 	// 价格一律按官方 API，GPT 也找 openai，不找订阅版。
 	const costFrom = vendor ? findBuiltinIn(vendor, model.id) : undefined;
-	const contextWindow = pick(override?.contextWindow, model.contextWindow, builtin?.contextWindow, DEFAULTS.contextWindow);
+	const contextWindow = pick(override?.contextWindow, model.contextWindow, builtin?.contextWindow, dev?.contextWindow, DEFAULTS.contextWindow);
+	const modelType = dev?.type;
 	const { headers, betas } = splitBetas({ ...service.headers, ...override?.headers }, api.value, contextWindow.value, vendor === "anthropic");
 
 	return {
 		id: model.id,
 		ownedBy: model.ownedBy,
-		hidden: (model.hidden ?? false) || IMAGE_MODEL.test(model.id),
+		hidden: (model.hidden ?? false) || IMAGE_MODEL.test(model.id) || (modelType !== undefined && modelType !== "chat"),
 		missing,
 		// 去掉后缀才匹配上时不借用名字，否则 claude-opus-5-5 和 claude-opus-5-5-high 会显示成同一个名字。
-		name: pick(override?.name, model.name, builtin && sameModel(builtin.id, model.id) ? builtin.name : undefined, model.id),
+		name: pick(
+			override?.name,
+			model.name,
+			builtin && sameModel(builtin.id, model.id) ? builtin.name : undefined,
+			dev && sameModel(dev.id, model.id) ? dev.name : undefined,
+			model.id,
+		),
 		api,
 		baseUrl: override?.baseUrl
 			? { value: override.baseUrl, source: "manual" }
@@ -252,13 +310,16 @@ export function resolveModel(
 		headers: Object.keys(headers).length ? headers : undefined,
 		betas,
 		contextWindow,
-		maxTokens: pick(override?.maxTokens, model.maxTokens, builtin?.maxTokens, DEFAULTS.maxTokens),
-		input: pick(override?.input, model.input, builtin?.input, ["text"]),
+		maxTokens: pick(override?.maxTokens, model.maxTokens, builtin?.maxTokens, dev?.maxTokens, DEFAULTS.maxTokens),
+		input: pick(override?.input, model.input, builtin?.input, dev?.input, ["text"]),
 		reasoning: thinking.reasoning,
 		thinkingLevelMap: thinking.map,
 		compat,
-		cost: pick(override?.cost, undefined, costFrom?.cost, ZERO_COST),
+		compatSources,
+		cost: pick(override?.cost, undefined, costFrom?.cost, dev?.cost, ZERO_COST),
 		builtin: builtin ? `${builtin.provider}/${builtin.id}` : undefined,
+		modelsDev: dev ? `${dev.provider}/${dev.id}` : undefined,
+		modelType,
 	};
 }
 

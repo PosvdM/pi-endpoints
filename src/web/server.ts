@@ -2,13 +2,14 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { withBetas } from "../betas.ts";
 import { clearDefaultModel, readDefaultModel, writeDefaultModel } from "../defaults.ts";
 import type { ModelOverride, ServiceConfig } from "../config.ts";
-import { describeError, type Endpoints } from "../endpoints.ts";
-import { type ResolvedModel, SUPPORTED_APIS, supportedLevels, toProviderModel } from "../resolve.ts";
+import { describeError, type Endpoints, typeLabel } from "../endpoints.ts";
+import { modelsDevStatus } from "../modelsdev.ts";
+import { isChatModel, type ResolvedModel, SUPPORTED_APIS, supportedLevels, toProviderModel } from "../resolve.ts";
 import { checkUpdate, VERSION } from "../version.ts";
 
 export interface WebUI {
@@ -146,16 +147,9 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 				} as ServiceConfig,
 				previousName,
 			);
-			// 添加服务时可以一起带上密钥，能拿到密钥就顺手拉一次目录。拉取失败不影响添加。
+			// 添加服务时可以一起带上密钥，能拿到密钥就接着拉一次目录。拉取失败不影响添加。
 			if (typeof body.apiKey === "string" && body.apiKey.trim()) endpoints.setKey(service.name, body.apiKey);
-			if (previousName === undefined && endpoints.keySource(service.name)) {
-				try {
-					await endpoints.refresh(service.name);
-					endpoints.register(service.name);
-				} catch (error) {
-					return { ...state(endpoints), refreshError: describeError(error) };
-				}
-			}
+			if (previousName === undefined && endpoints.keySource(service.name)) return refreshService(endpoints, service.name);
 			return undefined;
 		}
 		case "removeService":
@@ -164,15 +158,8 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 		case "setKey":
 			endpoints.setKey(str(body.name, "name"), str(body.apiKey, "apiKey"));
 			return undefined;
-		case "refresh": {
-			try {
-				await endpoints.refresh(str(body.name, "name"));
-				endpoints.register(str(body.name, "name"));
-			} catch (error) {
-				return { ...state(endpoints), refreshError: describeError(error) };
-			}
-			return undefined;
-		}
+		case "refresh":
+			return refreshService(endpoints, str(body.name, "name"));
 		case "setServiceDisabled":
 			endpoints.setServiceDisabled(str(body.name, "name"), body.disabled === true);
 			return undefined;
@@ -180,6 +167,8 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 			const name = str(body.name, "name");
 			const id = str(body.id, "id");
 			if (!endpoints.service(name)?.enabled.includes(id)) throw new HttpError(400, "先启用这个模型");
+			const model = endpoints.models(name).find((item) => item.id === id);
+			if (model && !isChatModel(model)) throw new HttpError(400, `${id} 是${typeLabel(model.modelType)}，pi 不能拿它对话`);
 			if (!endpoints.status().find((status) => status.name === name)?.registered) throw new HttpError(400, `服务 ${name} 没有注册到 pi`);
 			await writeDefaultModel(name, id);
 			return undefined;
@@ -193,17 +182,45 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 		case "setOverride":
 			endpoints.setOverride(str(body.name, "name"), str(body.id, "id"), body.override as ModelOverride | undefined);
 			return undefined;
-		case "testModel":
-			return testModel(endpoints, str(body.name, "name"), str(body.id, "id"));
+		case "testModel": {
+			const level = body.thinkingLevel;
+			if (level !== undefined && typeof level !== "string") throw new HttpError(400, "thinkingLevel 必须是字符串");
+			return testModel(endpoints, str(body.name, "name"), str(body.id, "id"), level);
+		}
 		default:
 			throw new HttpError(404, `没有 ${name} 这个操作`);
 	}
 }
 
-/** 用当前解析出的参数直接发一条消息，失败时原样返回服务端的错误。 */
-async function testModel(endpoints: Endpoints, name: string, id: string) {
+/**
+ * 刷新服务目录，再在需要时更新 models.dev 并等它完成（最多 60 秒）。
+ * models.dev 失败不算刷新失败，原因在状态的 `modelsDev.error` 里。
+ */
+async function refreshService(endpoints: Endpoints, name: string) {
+	let refreshError: string | undefined;
+	try {
+		await endpoints.refresh(name);
+		endpoints.register(name);
+	} catch (error) {
+		refreshError = describeError(error);
+	}
+	await endpoints.updateModelsDev();
+	return refreshError === undefined ? undefined : { ...state(endpoints), refreshError };
+}
+
+/**
+ * 用当前解析出的参数直接发一条消息，失败时原样返回服务端的错误。
+ * `thinkingLevel` 必须是这个模型可选的档位（off 除外），不传时不设置思考档位。
+ */
+async function testModel(endpoints: Endpoints, name: string, id: string, thinkingLevel?: string) {
 	const resolved = endpoints.models(name).find((model) => model.id === id);
 	if (!resolved) throw new HttpError(404, `${name} 上没有 ${id}`);
+	if (thinkingLevel !== undefined) {
+		const levels = supportedLevels(resolved.reasoning.value, resolved.thinkingLevelMap.value).filter((level) => level !== "off");
+		if (!levels.includes(thinkingLevel)) {
+			throw new HttpError(400, levels.length ? `${id} 的思考档位只能是 ${levels.join("、")}` : `${id} 不支持调节思考档位`);
+		}
+	}
 	const apiKey = endpoints.apiKey(name);
 	if (!apiKey) throw new HttpError(400, `服务 ${name} 还没有设置密钥`);
 	const model = { ...toProviderModel(resolved), provider: name } as Model<Api>;
@@ -211,7 +228,10 @@ async function testModel(endpoints: Endpoints, name: string, id: string) {
 	const message = await completeSimple(
 		model,
 		{ messages: [{ role: "user", content: "Reply with exactly: OK", timestamp: Date.now() }] },
-		withBetas({ apiKey, signal: AbortSignal.timeout(TEST_TIMEOUT_MS) }, resolved.betas),
+		withBetas(
+			{ apiKey, signal: AbortSignal.timeout(TEST_TIMEOUT_MS), reasoning: thinkingLevel as ThinkingLevel | undefined },
+			resolved.betas,
+		),
 	);
 	const text = message.content
 		.filter((block) => block.type === "text")
@@ -224,7 +244,7 @@ async function testModel(endpoints: Endpoints, name: string, id: string) {
 			text,
 			error: message.errorMessage,
 			durationMs: Date.now() - started,
-			request: { api: model.api, baseUrl: model.baseUrl, id: model.id },
+			request: { api: model.api, baseUrl: model.baseUrl, id: model.id, thinkingLevel },
 		},
 	};
 }
@@ -245,6 +265,7 @@ function state(endpoints: Endpoints) {
 		apis: SUPPORTED_APIS,
 		loadError: endpoints.loadError,
 		defaultModel: readDefaultModel(),
+		modelsDev: modelsDevStatus(),
 		services: endpoints.config.services.map((service) => {
 			const catalog = endpoints.catalog(service.name);
 			return {

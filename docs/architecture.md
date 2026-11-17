@@ -7,13 +7,14 @@
 | 文件 | 职责 |
 |---|---|
 | `src/index.ts` | 插件入口。加载时用配置和缓存注册服务商，再注册命令，不访问网络。 |
-| `src/config.ts` | 配置、密钥、缓存三个文件的类型和读写；决定交给 pi 的 `apiKey` 写法。 |
+| `src/config.ts` | 配置、密钥、目录缓存和 models.dev 四个文件的路径和读写，前三个文件的类型；决定交给 pi 的 `apiKey` 写法。 |
 | `src/catalog.ts` | 请求和解析服务端模型目录。 |
 | `src/builtin.ts` | 在 pi 自带的模型目录里按名字查模型，判断模型原厂。 |
-| `src/resolve.ts` | 把目录、pi 自带目录和手动设置合并成 pi 的模型配置，记录每个值的来源；选择协议；生成 `thinkingLevelMap`。 |
+| `src/modelsdev.ts` | 下载 models.dev 目录、保存本地文件、映射成 pi 的参数，按名字查模型；判断是否到了下载时间。 |
+| `src/resolve.ts` | 把目录、pi 自带目录、models.dev 和手动设置合并成 pi 的模型配置，记录每个值的来源；选择协议；生成 `thinkingLevelMap`；合并 compat。 |
 | `src/betas.ts` | 决定 Anthropic 协议的模型要追加哪些 beta，并在请求体上追加。 |
 | `src/defaults.ts` | 用 pi 的 `SettingsManager` 读写 pi 的默认模型。 |
-| `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、修改配置。 |
+| `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、判断是否需要 models.dev、修改配置。 |
 | `src/commands.ts` | `/endpoints` 命令：启动管理页并打开浏览器。插件只有这一个命令，所有操作都在管理页里完成。 |
 | `src/version.ts` | 插件版本号，以及到 npm 检查有没有新版本。 |
 | `src/web/server.ts` | 管理页的 HTTP 服务和接口。 |
@@ -21,10 +22,11 @@
 
 ## 数据流
 
-1. 插件加载时，`Endpoints` 读取 `endpoints.json`、`endpoints-auth.json` 和 `endpoints-cache.json`，对每个服务调用 `register()`。配置或密钥文件读不了时，把原因记在 `loadError`，按空配置继续加载，命令照常注册。
-2. `register()` 用 `resolveService()` 合并出所有模型，筛出已启用的，调用 `pi.registerProvider(name, ProviderConfig)`。服务没有密钥或没有启用的模型时改为注销。
-3. pi 调用服务商的 `refreshModels` 时（交互模式和 RPC 模式启动后、打开 `/model` 时），如果 `context.allowNetwork` 为真，就请求服务端目录、写缓存，然后返回最新的模型列表，由 pi 替换已注册的模型。
-4. 管理页和命令的修改都经过 `Endpoints` 的方法。每个方法先调用 `beginChange()` 重新读取三个文件，在最新内容上改动、保存，再调用 `registerAll()` 重新注册。
+1. 插件加载时，`Endpoints` 读取 `endpoints.json`、`endpoints-auth.json`、`endpoints-cache.json` 和 `endpoints-modelsdev.json`，对每个服务调用 `register()`，不访问网络。配置或密钥文件读不了时，把原因记在 `loadError`，按空配置继续加载，命令照常注册。
+2. `register()` 用 `resolveService()` 合并出所有模型，筛出已启用的对话模型，调用 `pi.registerProvider(name, ProviderConfig)`。服务没有密钥或没有可注册的模型时改为注销。
+3. pi 调用服务商的 `refreshModels` 时（交互模式和 RPC 模式启动后、打开 `/model` 时），如果 `context.allowNetwork` 为真，就请求服务端目录、写缓存，然后返回最新的模型列表，由 pi 替换已注册的模型。目录请求结束后（成功或失败），在后台调用 `Endpoints.updateModelsDev()`，不等它完成；拿到新的 models.dev 数据后调用 `registerAll()`。`registerProvider` 会让 pi 以 `allowNetwork: false` 再调用一次 `refreshModels`，这时不刷新目录，也不会再触发 models.dev 更新，所以不会循环。
+4. 管理页的 `refresh` 和新建服务时的首次刷新，在目录请求结束后同样调用 `updateModelsDev()`，但等它完成再返回状态。
+5. 管理页和命令的修改都经过 `Endpoints` 的方法。每个方法先调用 `beginChange()` 重新读取配置、密钥和目录缓存三个文件，在最新内容上改动、保存，再调用 `registerAll()` 重新注册。
 
 ## 并发和过期数据
 
@@ -88,7 +90,9 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 `endpoints-cache.json` 的格式是 `{ "<服务名>": Catalog }`，`Catalog` 见 `src/catalog.ts`。文件损坏时当作没有缓存。
 
-三个文件都先写临时文件再改名，避免写到一半时留下损坏的文件。文件位置取自 pi 的 `getAgentDir()`，测试通过环境变量 `PI_CODING_AGENT_DIR` 把它换成临时目录。
+`endpoints-modelsdev.json` 的格式见 [models.dev](#modelsdev) 一节。
+
+四个文件都先写临时文件再改名，避免写到一半时留下损坏的文件。文件位置取自 pi 的 `getAgentDir()`，测试通过环境变量 `PI_CODING_AGENT_DIR` 把它换成临时目录。
 
 ## 密钥
 
@@ -113,9 +117,77 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `visibility: "hide"` 的模型标为隐藏，列表里默认不显示，但仍可启用。
 - `resolveModel()` 另外把名字里有独立 `image` 一词的模型（如 `gpt-image-2`、`gemini-3.1-flash-image`）标为隐藏。它们是图片生成模型，pi 不能拿来对话，而 CLIProxyAPI 只把 `gpt-image-*` 标成了 `hide`。
 
+## models.dev
+
+pi 自带目录查不到的模型（如 new-api 类中转站上的国产模型），参数从 [models.dev](https://models.dev) 补齐。代码在 `src/modelsdev.ts`。
+
+### 数据源
+
+`MODELS_DEV_URL` 是 `https://models.dev/experimental/v2.0/api.json`，v2 完整目录，`base_model` 继承已经合并好。未压缩约 12 MB，gzip 后约 900 KB。服务端返回 `ETag`，请求带 `If-None-Match` 时，数据没有变化就回 304。models.dev 没有按服务商或按模型返回 JSON 的地址，只能取整份。v1 的 `/api.json` 默认去掉了分类模型，所以用 v2。
+
+### 服务商名单
+
+models.dev 上有 300 多个服务商，大多转卖别家的模型，参数和原厂不一定一致。`MODELS_DEV_PROVIDERS` 只列直营服务商，依次是 openai、anthropic、google、xai、deepseek、moonshotai、zai、zhipuai、alibaba、alibaba-cn、mistral、minimax、xiaomi、meta、cohere、perplexity、stepfun、volcengine、inception、ai21、typesafe。
+
+`findModelsDev()` 先在原厂（`vendorOf()` 的结果，用同名的 models.dev 服务商）里找，再按名单顺序找其余服务商。每个服务商里按 `candidateIds()` 的顺序匹配 id，和 `findBuiltin()` 相同。
+
+### 字段映射
+
+`parseModelsDevModel()` 把一个模型映射成 pi 的参数，缺的字段留空，交给下一层：
+
+| pi 参数 | 来源 |
+| --- | --- |
+| 名称 | `name`。和 pi 自带目录一样，只有去掉前缀后 id 完全相同时才借用（`sameModel()`） |
+| 上下文 | `limit.context`，只取正数 |
+| 最大输出 | `limit.output`，只取正数。不看 `limit.input` |
+| 输入 | `modalities.input` 里有 `image` 或以 `image/` 开头的项时为 `["text", "image"]`，否则为 `["text"]` |
+| 思考 | `capabilities.reasoning.supported` 为 `false` 时不支持调节。有 `effort` 列表时用 `levelsToMap(effort, api)` 转换，除 `off` 以外没有可选档位时 `reasoning` 为 `false`。`supported` 为 `true` 但没有 `effort` 时，`reasoning` 为 `true`，`thinkingLevelMap` 为 `undefined`，交给 pi 的默认档位。`toggle` 和 `budget` 不转换，pi 自己生成目录时也不用它们 |
+| 价格 | `cost.text` 的 `input.price`、`output.price`、`input.cache.read`；`cacheWrite` 取 `input.cache.write`，是 TTL 表时取第一个值（默认 TTL），没有时取 `cache.explicit.write`，同样取第一个。`input` 或 `output` 缺失，或者 `unit` 不是 `token`（没写算 `token`）时不提供价格。不按上下文分档 |
+| 模型类型 | `type`，没写时为 `chat` |
+
+compat 不从 models.dev 取。
+
+`type` 不是 `chat` 的模型（分类、图片生成、向量、语音等）pi 不能拿来对话：`resolveModel()` 把它们标为隐藏，`isChatModel()` 返回 `false`。`setEnabled()` 启用这类模型时报错；已经启用的保留在 `enabled` 里，但 `register()` 不注册它们，停用照常可以。插件不把它们注册成 pi 的分类模型或图片模型。
+
+### 何时下载
+
+- `Endpoints.needsModelsDev()` 判断是否需要：在没停用、有密钥的服务里，有模型（目录里的全部模型，加上已启用但目录里没有的）的上下文、最大输出、输入、思考或价格当前取自 models.dev 或默认值。不需要时不下载。
+- `Endpoints.updateModelsDev()` 在需要时调用 `updateModelsDev()`，拿到新数据后调用 `registerAll()`。同一个 `Endpoints` 并发调用时共用同一个任务，只重新注册一次。
+- `updateModelsDev()` 先用 `loadModelsDev()` 重新读文件，因为可能同时运行着多个 pi，别的 pi 可能刚下载过；文件里的 `fetchedAt` 或 `etag` 变了就算数据变化。然后判断是否到期：本地没有数据，或上次成功检查超过 24 小时（`CHECK_INTERVAL_MS`）；失败后 30 分钟内（`RETRY_AFTER_MS`）不再试，失败时间只记在进程内。同一进程里同时只发一个请求，并发的调用共用结果。
+- 请求带 `If-None-Match`，超时 60 秒（`FETCH_TIMEOUT_MS`）。回 304 时只更新 `checkedAt`。失败原因记在进程内，成功后清空；重新读到的文件的 `checkedAt` 晚于本进程的失败时间时，说明别的 pi 在失败之后检查成功过，也清空失败原因和 30 分钟的退避。`modelsDevStatus()` 把失败原因和时间、`fetching` 一起交给管理页。`updateModelsDev()` 不抛出错误。
+- 调用时机见[数据流](#数据流)：pi 调用 `refreshModels` 时在后台进行；管理页刷新时等它完成。插件加载时只读文件，`pi -p` 这类非交互运行不会调用 `refreshModels`，所以只用本地文件。
+
+### 文件格式
+
+`endpoints-modelsdev.json`：
+
+```json
+{
+	"version": 1,
+	"etag": "\"abc\"",
+	"fetchedAt": 1794880000000,
+	"checkedAt": 1794880000000,
+	"providers": {
+		"moonshotai": {
+			"kimi-k3": {
+				"name": "Kimi K3",
+				"limit": { "context": 1048576, "output": 1048576 },
+				"modalities": { "input": ["text", "image/png"] },
+				"capabilities": { "reasoning": { "supported": true, "effort": ["low", "high", "max"] } },
+				"cost": { "text": { "input": { "price": 3, "cache": { "read": 0.3, "write": 3 } }, "output": { "price": 15 } } }
+			}
+		}
+	}
+}
+```
+
+- `fetchedAt` 是最后一次拿到新数据的时间，`checkedAt` 是最后一次成功检查的时间（含 304），都是毫秒时间戳。
+- `providers` 只含名单上的服务商。每个模型保留 v2 目录的结构，只留下映射用得到的字段（`extractModelsDev()` 裁剪），文件约 190 KB。映射在读取时进行，修改映射规则不需要重新下载。
+- 文件不缩进。以下情况整份文件当作没有数据，下次需要时重新下载，且不带 `If-None-Match`：JSON 损坏；`version` 不等于 `FILE_VERSION`；`fetchedAt` 或 `checkedAt` 不是有限的非负数；`etag` 不是字符串；某个服务商或模型不是对象；一个模型都没有。只丢掉坏的部分不行：留下的空数据会在到期后带着旧 ETag 请求，服务端回 304，数据就一直恢复不了。下载到的目录里一个名单上的模型都没有时，`extractModelsDev()` 报错，不写文件。要保存新的字段时把 `FILE_VERSION` 加一。
+
 ## 合并参数
 
-`resolveModel()` 对每项参数按顺序取值：手动设置 → 服务端目录 → pi 自带目录 → 默认值，并把来源记在 `Sourced.source` 里，管理页据此显示来源标签。
+`resolveModel()` 对每项参数按顺序取值：手动设置 → 服务端目录 → pi 自带目录 → models.dev → 默认值，并把来源记在 `Sourced.source` 里（models.dev 为 `"modelsdev"`），管理页据此显示来源标签。匹配到的 pi 自带条目和 models.dev 条目分别记在 `builtin` 和 `modelsDev`，models.dev 的模型类型记在 `modelType`。
 
 ### 在 pi 自带目录里查找
 
@@ -135,12 +207,18 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 ### compat
 
-- 手动 `override.compat` 存在时，整体替换抄来的设置；未设置时，从原厂在 pi 自带目录里的同名条目抄。
+compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目录和 models.dev 取。`resolveCompat()` 依次合并：
+
+1. 抄来的部分，规则见下面几条。
+2. 最终协议为 `anthropic-messages` 时，设置 `sendSessionAffinityHeaders: true`（来源为默认值），即使抄来的字段为 `false`。其他协议不添加这个默认值。
+3. 手动 `override.compat` 逐字段覆盖：值为 `null` 表示删掉这个字段，其他值覆盖。`false` 可以关闭会话亲和。
+
+结果为空对象时为 `undefined`。合并时创建新对象，不修改手动配置或 pi 自带目录。手动 compat 写全了抄来的每个字段时，结果和直接使用手动 compat 相同；缺了某个抄来的字段时，这个字段保留抄来的值，要去掉它须把值写成 `null`。
+
 - GPT 模型在 ChatGPT 订阅类服务上（`Catalog.codex` 为真，或 `owned_by` 为 `codex`）改抄 `openai-codex` 的条目。官方 `openai` 条目里的 `supportsStrictMode`、`supportsExplicitPromptCacheMode` 等是官方 API 的能力，订阅版没有。
 - 只有原厂条目的协议和模型实际使用的协议属于同一族时才抄（`openai-codex-responses`、`azure-openai-responses` 和 `openai-responses` 算同一族）。例如手动把 Claude 改成走 `openai-completions` 后，Anthropic 的 compat 不再适用。
-- 模型不支持调节思考时，从抄来的 compat 中去掉 `forceAdaptiveThinking` 和 `supportsMidConvoEffort`。带着这两个标志，pi 的 Anthropic 实现会忽略 `reasoning: false`，照样发送 adaptive thinking 和 `effort`。
-- 最终协议为 `anthropic-messages` 时，在选出的 compat 上合并 `sendSessionAffinityHeaders: true`，即使 compat 原本不存在或抄来的字段为 `false`，也按此默认值设置；`override.compat.sendSessionAffinityHeaders` 显式设置的值优先，`false` 可以关闭。其他协议不添加这个默认值。合并时创建新对象，不修改手动配置或 pi 自带目录。
-- compat 的整体来源沿用选中的手动或 pi 层；原本没有 compat 时，补入的会话亲和设置标为默认值。管理页在混合来源时显示“手动 + 默认值”或“pi 自带 + 默认值”，每个 compat 标签的悬停提示显示该字段的来源。
+- 模型不支持调节思考时，从抄来的 compat 中去掉 `forceAdaptiveThinking` 和 `supportsMidConvoEffort`。带着这两个标志，pi 的 Anthropic 实现会忽略 `reasoning: false`，照样发送 adaptive thinking 和 `effort`。这条只作用于抄来的部分，手动写的照常生效。
+- `compatSources` 记录最终 compat 里每个字段的来源（`manual`、`pi` 或 `default`），管理页据此显示每个字段的来源。`compat.source` 是整体来源：手动 compat 有任何字段（含值为 `null` 的）时为 `manual`，否则抄到了字段时为 `pi`，都没有时为 `default`。
 - pi-ai 在请求选项有 `sessionId` 且会话亲和开启时发送 `x-session-affinity: <sessionId>`；`sessionAffinityFormat` 为 `openrouter` 时改用 `x-session-id`。会话 ID 和请求头由 pi 提供，插件不自行生成。
 - 上下文、思考档位等参数不跟着 compat 抄，仍按上面的顺序取值。
 
@@ -148,11 +226,11 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 ### 价格
 
-按原厂从 pi 自带目录抄官方 API 价格。GPT 一律找 `openai`，不找订阅版。找不到时为 0。
+取值顺序是：手动设置 → 按原厂从 pi 自带目录抄的官方 API 价格 → models.dev → 0。服务端目录不提供价格。在 pi 自带目录里，GPT 一律找 `openai`，不找订阅版；原厂不明时（如 DeepSeek）不从 pi 自带目录抄价格。
 
 ### 思考档位
 
-`levelsToMap()` 把服务端列出的档位转成 pi 的 `thinkingLevelMap`：
+`levelsToMap()` 把服务端或 models.dev 列出的档位转成 pi 的 `thinkingLevelMap`：
 
 - pi 的档位是 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。服务端列出的照原样映射，没列出的设为 `null`。
 - `off` 只在服务端列出 `none` 或 `off` 时开放，值沿用服务端的写法。OpenAI 协议把这个值原样作为 `reasoning.effort` 发送，其他协议不看具体值。
@@ -179,14 +257,15 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - 服务名必须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不能和 pi 自带的服务商同名。用 `registerProvider` 注册同名服务商并提供 `models` 时，会替换掉它全部的自带模型。
 - 停用的服务不注册。
 - 没有密钥时不注册。pi 本身允许注册，但会让用户去 `/login` 输入密钥，和本插件的密钥管理冲突。
-- 已启用但目录里没有的模型仍然注册，用 pi 自带目录和默认值补齐参数。读过目录后，这类模型在管理页里标为"目录里没有"；还没读过目录时不标。
+- 已启用但目录里没有的模型仍然注册，用 pi 自带目录、models.dev 和默认值补齐参数。读过目录后，这类模型在管理页里标为"目录里没有"；还没读过目录时不标。
+- models.dev 标为非 `chat` 类型的模型即使已启用也不注册。服务只启用了这类模型时，按没有启用的模型处理，不注册。`setEnabled()` 启用一个模型前总是解析它的类型，目录里没有的 id 按 `{ id }` 解析，所以目录外的非对话模型同样不能启用。
 
 ## pi 默认模型
 
 管理页的星标读写的是 pi 自己的设置：`~/.pi/agent/settings.json` 里的 `defaultProvider` 和 `defaultModel`。`src/defaults.ts` 用 pi 导出的 `SettingsManager` 写入，效果和在 pi 的 `/model` 里按 Ctrl+S 相同：
 
 - `SettingsManager` 写文件时加锁，只合并改动的字段，不会覆盖其他 pi 进程或 pi-sync 同时写入的设置。
-- 设置了 `enabledModels`（Ctrl+P 轮换列表）时，pi 会把新的默认模型加进去，这里也照做。pi 先按展开后的模型判断是否已在列表里，这里只比对完整的模型名，列表里的通配符已经覆盖这个模型时会多加一条。要不要加先算好再写，列表格式不对时不会只写了一半。
+- 设置了 `enabledModels`（Ctrl+P 轮换列表）时，pi 会把新的默认模型加进去，这里也照做。pi 先按展开后的模型判断是否已在列表里，这里只比对完整的模型名，列表里的通配符已经覆盖这个模型时会多加一条。`enabledModels` 不是数组时不改它，照样写入默认模型；数组里不是字符串的项不参与比对。
 - `settings.json` 读不了时，`SettingsManager` 不写文件，只把错误记下来，`open()` 先检查加载错误并拒绝写入。
 - 用 `projectTrusted: false` 打开，不读当前目录的 `.pi/settings.json`。写入只写全局设置，读取也只读全局设置，页面上的星标才和刚写入的值一致；项目设置的 `enabledModels` 也不会被合并进全局列表。项目设置里的 `defaultModel` 在那个目录里仍然优先，页面不显示它。
 
@@ -204,20 +283,34 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 
 接口：
 
-- `GET /api/state` 返回全部状态，包括 `loadError` 和插件版本 `version`。
+- `GET /api/state` 返回全部状态，包括 `loadError`、插件版本 `version` 和 models.dev 的状态 `modelsDev: { fetchedAt?, checkedAt?, error?, fetching }`（见 `modelsDevStatus()`）。每个模型在 `ResolvedModel` 的字段（含 `compatSources`、`modelsDev`、`modelType`）之外，还有 `enabled`、`levels` 和原样的手动设置 `override`，手动 compat 里值为 `null` 的字段也在其中。
 - `GET /api/update` 在 npm 上有新版本时返回 `{ latestVersion, releaseUrl }`，否则返回 `{}`。
-- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setEnabled`、`setOverride`，成功时返回最新状态，失败时返回 400 和 `{ error }`。
-- `refresh` 总是返回 200 和最新状态；刷新失败时状态里多一个 `refreshError`。
-- `testModel` 返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`。
-- `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。可以带 `apiKey`，和服务一起保存。新建服务时只要拿得到密钥（`apiKey` 或密钥环境变量），就接着刷新目录；刷新失败时服务已经保存，和 `refresh` 一样返回 200 和带 `refreshError` 的状态。
+- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setServiceDisabled`、`setEnabled`、`setOverride`、`setDefaultModel`、`clearDefaultModel`，成功时返回最新状态，失败时返回 400 和 `{ error }`。
+- `setEnabled` 启用 models.dev 标为非 `chat` 类型的模型时返回 400，错误信息说明模型类型，如"jev-latest 是分类模型，pi 不能拿它对话"；停用不受限制。`setDefaultModel` 对这类模型同样返回 400。
+- `refresh` 刷新服务目录，需要时再更新 models.dev，等它完成（最多 60 秒）后返回 200 和最新状态。目录刷新失败时状态里多一个 `refreshError`；models.dev 失败不算刷新失败，原因只在 `modelsDev.error` 里。
+- `testModel` 的请求体可以带 `thinkingLevel`：pi 的档位名，必须是这个模型 `levels` 里 `off` 以外的一项，否则返回 400。返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`，`request` 含 `api`、`baseUrl`、`id`，带了档位时还有 `thinkingLevel`。
+- `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。可以带 `apiKey`，和服务一起保存。新建服务时只要拿得到密钥（`apiKey` 或密钥环境变量），就接着按 `refresh` 的方式刷新目录和 models.dev；刷新失败时服务已经保存，和 `refresh` 一样返回 200 和带 `refreshError` 的状态。
 
-页面的状态变化后，`render()` 重建整个内容区，包括操作失败时显示错误。服务表单因此把还没保存的内容记在 `serviceDraft` 里，按服务名区分，重建时优先用它；保存成功、切换服务或点"添加服务"时清掉。新增其他会被 `render()` 重建的表单时，也要这样保存输入。打开页面后，以及在左栏重新启用服务后，`refreshInBackground()` 在后台调用 `refresh`，失败原因只显示在服务状态里，不弹顶部提示。这是唯一不由用户操作触发的重画，所以由 `flush()` 把它推迟到没有文字输入框获得焦点、也没有按着鼠标的时候，免得输入框失去焦点、没保存的密钥被清掉，或者点击落在被替换掉的元素上。`refreshing` 记下正在刷新的服务，这些服务的"刷新目录"按钮显示"刷新中…"并且不能点，手动刷新也用它。密钥框只出现在添加服务的表单里，已有服务的密钥在单独的密钥卡片里修改。密钥框用 `type="password"` 加 `autocomplete="one-time-code"`，免得 Chrome 把网站的已存密码填进来：密码框会忽略 `off`，`new-password` 会弹出生成密码。添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随。
+页面的状态变化后，`render()` 重建整个内容区，包括操作失败时显示错误。服务表单因此把还没保存的内容记在 `serviceDraft` 里，按服务名区分，重建时优先用它；保存成功、切换服务或点"添加服务"时清掉。密钥卡片的输入框同样把没保存的密钥记在 `keyDraft` 里，清掉的时机相同。新增其他会被 `render()` 重建的表单时，也要这样保存输入。打开页面后，以及在左栏重新启用服务后，`refreshInBackground()` 在后台调用 `refresh`，失败原因只显示在服务状态里，不弹顶部提示。这是唯一不由用户操作触发的重画，所以由 `flush()` 把它推迟到没有文字输入框获得焦点（`typing()` 为假）、也没有按着鼠标的时候，免得输入框失去焦点，或者点击落在被替换掉的元素上。`refreshing` 记下正在刷新的服务，这些服务的"刷新目录"按钮显示"刷新中…"并且不能点，手动刷新也用它。密钥框只出现在添加服务的表单里，已有服务的密钥在单独的密钥卡片里修改。密钥框用 `type="password"` 加 `autocomplete="one-time-code"`，免得 Chrome 把网站的已存密码填进来：密码框会忽略 `off`，`new-password` 会弹出生成密码。添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随。
 
 模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写），分组和前缀按钮按 `byPrefix()` 排序：`PREFIX_ORDER` 里的前缀按列表顺序排在前面，其余按字母序；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。左栏的服务也这样处理：`parked` 记下页面打开时每个服务是否停用，`serviceGroups()` 按这份记录把服务分成启用和停用两组，组内保持配置文件里的顺序；打开页面后新加的服务按加入时的状态归组。
 
+列表的 `kept` 出于同样的原因，记下当前服务里刚用开关启用或停用、或在详情里保存或清除了手动设置的模型，`matches()` 不按"显示隐藏模型"和协议筛选排除这些模型；改了筛选条件（搜索、协议、`owned_by`、"显示隐藏模型"和前缀按钮）、切换服务或刷新页面时清空。`renderChips()` 在当前选中的前缀数量为 0 时补上这个按钮，筛选条件始终看得到。
+
+详情面板不随 `render()` 重建，免得冲掉没保存的输入；`renderDrawer()` 只在打开面板、保存或清除手动设置后重建，开关的状态和星标由各自的代码单独更新。
+
+- 关闭前的确认：`overrideForm()` 建好表单后记下各输入框的值，`drawerDirty()` 和当前的值比较，测试消息的档位不算在内。Esc、遮罩和 × 都调用 `closeDrawer()`，有修改时先用 `confirm()` 确认。`typing()` 为真，或者 `event.isComposing` 为真、`keyCode` 为 229（输入法正在选字）时，Esc 不处理。
+- 错误的位置：面板分为可滚动的 `.drawer-body`、提示区 `#drawer-msg` 和底部按钮。表单的校验错误、`run()` 失败的原因和测试结果都由 `drawerMessage()` 放进提示区，它在底部按钮上方，不随面板内容滚动。`run()` 成功时只清掉提示区里的错误，测试结果保留。
+- 数字解析：上下文和最大输出用 `type="text"`，由 `parseCount()` 解析。Safari 和 Firefox 的 number 输入框遇到 `1,000,000`、`1M` 时 `value` 为空字符串，会被当成没填。`parseCount()` 接受纯数字、每三位用逗号或空格分组的数字，以及带 K（1000）或 M（1000000）后缀、不超过对应位数的小数；按字符串移动小数点，避免 `1.1 * 1e6` 这类浮点误差。结果不是正的安全整数时报错，不保存。K 和 M 的含义和 `short()` 显示的单位一致。
+- 对话以外的模型：`nonChat()` 按 `modelType` 判断，没有这个字段时按对话模型处理。这类模型没启用时，`enableSwitch()` 生成的开关带 `aria-disabled`，在 `click` 里 `preventDefault()` 阻止勾选；星标也按不能用处理。点不了的开关和星标都不用 `disabled`：禁用的控件会吞掉点击，列表行就打不开详情了，列表行的点击处理只跳过没有 `aria-disabled` 的控件。
+- compat 标签的来源取自 `compatSources`；没有这个字段时按整体来源推算，Anthropic 协议的会话亲和字段没有手动设置时算作默认值。`override.compat` 里值为 `null` 的字段显示为带删除线的标签。
+- 测试消息的档位下拉框列出 `levels` 里除 `off` 以外的档位，选了档位时请求体带 `thinkingLevel`，结果按 `test.request.thinkingLevel` 显示实际发出的档位。
+
+图例旁的 models.dev 状态由 `modelsDevStatus()` 按 `state.modelsDev` 生成：`fetching` 为真时显示正在拉取，有 `error` 时用警告颜色显示原因，否则显示 `fetchedAt`；都没有时不显示。页面只在拿到新状态时重画，而 `refresh` 等 models.dev 拉取完成才返回，所以刷新目录时一般看不到“正在拉取”；只有页面拿到的状态正处于拉取中时才显示，例如打开页面时 pi 正在后台拉取。
+
 `src/version.ts` 从包内的 `package.json` 读出 `VERSION`。`checkUpdate()` 读取 `https://registry.npmjs.org/pi-endpoints/latest`，用 `isNewer()` 按数字逐段比较 `x.y.z`，带预发布后缀的版本不比较。成功的结果在进程内缓存 6 小时；失败（超时 10 秒）时沿用上次的结果，30 分钟后再试。查询可能要等几秒，所以页面先用 `/api/state` 渲染，再由 `showVersion()` 单独请求 `/api/update`，有新版时在版本号右边加上指向 GitHub Release 的绿色箭头。
 
-`testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，Anthropic 协议的模型同样经过 `withBetas()`，不设置思考档位，超时 60 秒。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。
+`testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，Anthropic 协议的模型同样经过 `withBetas()`，超时 60 秒。请求带 `thinkingLevel` 时，把它作为 `completeSimple()` 选项里的 `reasoning` 发送，由 pi 按模型的 `thinkingLevelMap` 转换；不带时不设置思考档位。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。
 
 ## 依赖和导入
 
@@ -231,11 +324,12 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 `npm test` 运行 `test/` 下的单元测试：
 
 - `catalog.test.ts`：目录解析、合并和请求顺序，用 `vi.stubGlobal("fetch")` 模拟服务端。
-- `resolve.test.ts`：参数分层、思考档位、协议选择、compat、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录。
-- `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple`、由模拟 `fetch` 捕获的请求中，Anthropic 会话亲和头遵守默认值、手动开关和会话 ID 条件，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
-- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作，写入 pi 默认模型时保留其他设置、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
+- `modelsdev.test.ts`：models.dev 的字段映射、裁剪、服务商名单和匹配顺序；下载时机，包括 24 小时检查间隔、失败后 30 分钟、304、超时、同时只发一个请求、重新读取别的 pi 写入的文件和损坏的文件。用 `vi.stubGlobal("fetch")` 模拟 models.dev，用 `Date.now` 的替身控制时间。
+- `resolve.test.ts`：参数分层（含 models.dev 层）、思考档位、协议选择、compat 的逐字段合并和 `null`、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录，用 `setModelsDevForTest()` 换掉 models.dev 数据。整份写在配置里的手动 compat 合并后结果不变，也有测试覆盖。
+- `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验（含 compat 字段值为 `null`）、models.dev 的启动读取、是否需要下载、`refreshModels` 后台下载后重新注册且不循环、非对话模型不注册也不能启用、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple`、由模拟 `fetch` 捕获的请求中，Anthropic 会话亲和头遵守默认值、手动开关和会话 ID 条件，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
+- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作，刷新时等待 models.dev 及其失败不算刷新失败，测试消息的思考档位校验和发送，写入 pi 默认模型时保留其他设置、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
 
-`test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。
+`test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。models.dev 的数据和下载状态（失败时间、错误原因）是模块级的，同一个测试文件里的用例共用，所以会用到它的测试文件在 `beforeEach` 里调用 `setModelsDevForTest(undefined)` 清空。
 
 真实服务的验证在 pi 里进行，例如：
 

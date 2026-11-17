@@ -34,7 +34,7 @@ export function readDefaultModel(): DefaultModel | undefined {
 export async function writeDefaultModel(provider: string, id: string): Promise<void> {
 	const settings = open();
 	// pi 在设置了 Ctrl+P 轮换列表时会把新的默认模型加进去。这里只比对完整的模型名，不展开通配符。
-	// 先算好再写，列表格式不对时直接报错，不会只写了一半。
+	// 列表不是数组时不动它，照样写入默认模型；数组里不是字符串的项不参与比对。
 	const enabledModels = settings.getEnabledModels();
 	const reference = `${provider}/${id}`;
 	const addToScope =

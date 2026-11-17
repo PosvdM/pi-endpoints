@@ -3,12 +3,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeConfigValue, normalizeRoot } from "../src/config.ts";
 import { Endpoints, validateName } from "../src/endpoints.ts";
+import { MODELS_DEV_URL, setModelsDevForTest } from "../src/modelsdev.ts";
 import { fakePi, useTempAgentDir } from "./helpers.ts";
 
 let temp: ReturnType<typeof useTempAgentDir>;
 
 beforeEach(() => {
 	temp = useTempAgentDir();
+	setModelsDevForTest(undefined);
 });
 
 afterEach(() => {
@@ -209,6 +211,10 @@ describe("Endpoints 的校验和并发", () => {
 		expect(() => endpoints.setOverride("a", "m", { api: "nope" })).toThrow(/协议/);
 		expect(() => endpoints.setOverride("a", "m", { thinkingLevels: ["ultra"] })).toThrow(/思考档位/);
 		expect(() => endpoints.setOverride("a", "m", { cost: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 } })).toThrow(/价格/);
+		expect(() => endpoints.setOverride("a", "m", { compat: [] as never })).toThrow(/compat/);
+		// compat 的字段值为 null 表示删掉抄来的字段，原样保存。
+		endpoints.setOverride("a", "m", { compat: { supportsStrictTools: null } });
+		expect(endpoints.service("a")?.overrides.m.compat).toEqual({ supportsStrictTools: null });
 	});
 
 	it("刷新期间删除服务时不写回过期目录", async () => {
@@ -342,5 +348,152 @@ describe("Anthropic beta", () => {
 		// pi 自己算出的 beta 仍在
 		expect(betas.length).toBeGreaterThan(2);
 		expect(sent?.get("x-title")).toBe("pi");
+	});
+});
+
+describe("models.dev", () => {
+	const devModels = {
+		moonshotai: {
+			"dev-chat-9": {
+				name: "Dev Chat",
+				limit: { context: 777000, output: 7000 },
+				capabilities: { reasoning: { supported: false } },
+				cost: { text: { input: { price: 1 }, output: { price: 2 } } },
+			},
+		},
+		typesafe: { "jev-test-1": { type: "decision", limit: { context: 64000 } } },
+	};
+	const v2 = Object.fromEntries(Object.entries(devModels).map(([provider, models]) => [provider, { id: provider, models }]));
+
+	/** 服务目录里有 dev-chat-9 和 jev-test-1，models.dev 按 `modelsDev` 返回。返回请求过的地址。 */
+	function stubNetwork(modelsDev: () => Response = () => new Response(JSON.stringify(v2), { headers: { ETag: '"e"' } })) {
+		const urls: string[] = [];
+		vi.stubGlobal("fetch", async (url: string) => {
+			urls.push(url);
+			if (url === MODELS_DEV_URL) return modelsDev();
+			return new Response(
+				JSON.stringify(url.includes("client_version") ? { data: [] } : { data: [{ id: "dev-chat-9", owned_by: "custom" }, { id: "jev-test-1", owned_by: "custom" }] }),
+			);
+		});
+		return urls;
+	}
+
+	/** 和 pi 一样：注册服务商后以 allowNetwork: false 调用 refreshModels。 */
+	function reentrantPi() {
+		const fake = fakePi();
+		let registrations = 0;
+		const register = fake.pi.registerProvider;
+		fake.pi.registerProvider = ((name: string, config: Parameters<typeof register>[1]) => {
+			registrations++;
+			register(name, config);
+			void config.refreshModels?.({ allowNetwork: false, signal: new AbortController().signal } as never);
+		}) as typeof register;
+		return { ...fake, registrations: () => registrations };
+	}
+
+	const writeModelsDev = () =>
+		writeFileSync(
+			join(temp.dir, "endpoints-modelsdev.json"),
+			JSON.stringify({ version: 1, fetchedAt: Date.now(), checkedAt: Date.now(), providers: devModels }),
+		);
+
+	it("启动时读本地文件，不访问网络", () => {
+		writeModelsDev();
+		const urls = stubNetwork();
+		const { pi, providers } = fakePi();
+		const setup = new Endpoints(pi);
+		setup.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled: ["dev-chat-9"], overrides: {} });
+		setup.setKey("cpa", "k");
+		new Endpoints(pi).registerAll();
+		expect(providers.get("cpa")?.models?.[0]).toMatchObject({ contextWindow: 777000, maxTokens: 7000, reasoning: false });
+		expect(urls).toEqual([]);
+	});
+
+	it("refreshModels 刷新目录后在后台拉 models.dev，拿到新数据后重新注册，不会循环", async () => {
+		const urls = stubNetwork();
+		const { pi, providers, registrations } = reentrantPi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled: ["dev-chat-9"], overrides: {} });
+		endpoints.setKey("cpa", "k");
+		const refresh = () => providers.get("cpa")?.refreshModels?.({ allowNetwork: true, signal: new AbortController().signal } as never);
+
+		const first = await refresh();
+		expect(first?.[0]).toMatchObject({ contextWindow: 128000 });
+		const before = registrations();
+		await endpoints.updateModelsDev();
+		expect(urls.filter((url) => url === MODELS_DEV_URL)).toHaveLength(1);
+		expect(providers.get("cpa")?.models?.[0]).toMatchObject({ contextWindow: 777000, cost: { input: 1, output: 2 } });
+		expect(registrations()).toBe(before + 1);
+
+		// 24 小时内再次刷新不再请求 models.dev。
+		await refresh();
+		await endpoints.updateModelsDev();
+		expect(urls.filter((url) => url === MODELS_DEV_URL)).toHaveLength(1);
+	});
+
+	it("allowNetwork 为 false 时不访问网络", async () => {
+		const urls = stubNetwork();
+		const { pi, providers } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled: ["dev-chat-9"], overrides: {} });
+		endpoints.setKey("cpa", "k");
+		await providers.get("cpa")?.refreshModels?.({ allowNetwork: false, signal: new AbortController().signal } as never);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(urls).toEqual([]);
+		expect(endpoints.needsModelsDev()).toBe(true);
+	});
+
+	it("只在没停用、有密钥的服务里有模型用到 models.dev 或默认值时才需要", () => {
+		const endpoints = new Endpoints(fakePi().pi);
+		expect(endpoints.needsModelsDev()).toBe(false);
+		endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled: ["m"], overrides: {} });
+		expect(endpoints.needsModelsDev()).toBe(false);
+		endpoints.setKey("cpa", "k");
+		expect(endpoints.needsModelsDev()).toBe(true);
+		endpoints.setServiceDisabled("cpa", true);
+		expect(endpoints.needsModelsDev()).toBe(false);
+		endpoints.setServiceDisabled("cpa", false);
+		endpoints.setOverride("cpa", "m", {
+			contextWindow: 1000,
+			maxTokens: 100,
+			input: ["text"],
+			thinkingLevels: [],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		expect(endpoints.needsModelsDev()).toBe(false);
+	});
+
+	it("不需要时不拉取", async () => {
+		const urls = stubNetwork();
+		const endpoints = new Endpoints(fakePi().pi);
+		await endpoints.updateModelsDev();
+		expect(urls).toEqual([]);
+	});
+
+	it("不是对话模型的不注册，不能启用，已启用的可以停用", () => {
+		writeModelsDev();
+		writeFileSync(
+			join(temp.dir, "endpoints.json"),
+			JSON.stringify({ services: [{ name: "cpa", baseUrl: "https://cpa.test", enabled: ["jev-test-1", "dev-chat-9"] }] }),
+		);
+		writeFileSync(join(temp.dir, "endpoints-auth.json"), JSON.stringify({ cpa: { apiKey: "k" } }));
+		const { pi, providers } = fakePi();
+		const endpoints = new Endpoints(pi);
+		endpoints.registerAll();
+		expect(providers.get("cpa")?.models?.map((model) => model.id)).toEqual(["dev-chat-9"]);
+		expect(endpoints.models("cpa").find((model) => model.id === "jev-test-1")).toMatchObject({ hidden: true, modelType: "decision" });
+
+		expect(() => endpoints.setEnabled("cpa", "jev-test-1", true)).toThrow("jev-test-1 是分类模型，pi 不能拿它对话");
+		endpoints.setEnabled("cpa", "jev-test-1", false);
+		expect(endpoints.service("cpa")?.enabled).toEqual(["dev-chat-9"]);
+	});
+
+	it("只启用了非对话模型时不注册服务", () => {
+		writeModelsDev();
+		writeFileSync(join(temp.dir, "endpoints.json"), JSON.stringify({ services: [{ name: "cpa", baseUrl: "https://cpa.test", enabled: ["jev-test-1"] }] }));
+		writeFileSync(join(temp.dir, "endpoints-auth.json"), JSON.stringify({ cpa: { apiKey: "k" } }));
+		const { pi, providers } = fakePi();
+		new Endpoints(pi).registerAll();
+		expect(providers.has("cpa")).toBe(false);
 	});
 });
