@@ -11,7 +11,7 @@
 	--bg: #f5f6f8; --panel: #fff; --subtle: #f0f1f4; --hover: #f6f7fa; --text: #17181c; --muted: #6b7080; --faint: #9a9eab;
 	--line: #e3e5ea; --line-strong: #d3d6dd; --accent: #3a66f0; --accent-soft: #e9eefe; --accent-text: #2a52cf;
 	--danger: #d03b31; --danger-soft: #fdecea; --ok: #1d8a4f; --ok-soft: #e6f4ec; --warn: #b5650a; --warn-soft: #fdf1e1;
-	--pi: #7a64d8; --shadow: 0 10px 40px rgba(20, 22, 30, .14), 0 2px 8px rgba(20, 22, 30, .06);
+	--pi: #7a64d8; --md: #c2418f; --shadow: 0 10px 40px rgba(20, 22, 30, .14), 0 2px 8px rgba(20, 22, 30, .06);
 	--mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
 }
 @media (prefers-color-scheme: dark) {
@@ -19,7 +19,7 @@
 		--bg: #0e0f11; --panel: #16171a; --subtle: #1d1f23; --hover: #1b1d21; --text: #e7e8eb; --muted: #8d919c; --faint: #636774;
 		--line: #26282d; --line-strong: #33363c; --accent: #6b8fff; --accent-soft: #1e2640; --accent-text: #9ab2ff;
 		--danger: #ff6f63; --danger-soft: #3a1c1a; --ok: #4cc283; --ok-soft: #15291e; --warn: #eaa74a; --warn-soft: #33250f;
-		--pi: #a796ff; --shadow: 0 10px 40px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .3);
+		--pi: #a796ff; --md: #f07cbc; --shadow: 0 10px 40px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .3);
 	}
 }
 * { box-sizing: border-box; }
@@ -142,6 +142,7 @@ td .model-id > :not(.id) { flex: none; }
 .src { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .src.server { background: var(--ok); }
 .src.pi { background: var(--pi); }
+.src.modelsdev { background: var(--md); }
 .src.manual { background: var(--accent); }
 .src.default { background: var(--warn); }
 .api { font: 11.5px var(--mono); padding: 1px 7px; border-radius: 6px; background: var(--subtle); color: var(--muted); }
@@ -149,6 +150,7 @@ td .model-id > :not(.id) { flex: none; }
 .tag { display: inline-block; font-size: 11px; line-height: 17px; padding: 0 6px; border-radius: 5px; background: var(--subtle); color: var(--muted); margin-left: 6px; vertical-align: 1px; font-family: system-ui, sans-serif; font-weight: 500; }
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
 .tag.accent { background: var(--accent-soft); color: var(--accent-text); }
+.tag.del { text-decoration: line-through; opacity: .75; }
 .star { border: 0; background: none; padding: 0 2px; margin-left: 4px; font-size: 14px; line-height: 0; color: var(--faint); cursor: pointer; vertical-align: -2px; }
 .star:not([aria-disabled]):hover { color: var(--warn); }
 .star[aria-disabled] { cursor: default; }
@@ -165,6 +167,7 @@ tr:hover .star.off, .star.off:focus-visible, .drawer-head .star.off { opacity: 1
 .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s; }
 .switch:checked { background: var(--accent); }
 .switch:checked::after { transform: translateX(12px); }
+.switch[aria-disabled] { opacity: .45; cursor: default; }
 
 /* 卡片和表单 */
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; max-width: 760px; }
@@ -184,8 +187,14 @@ tr:hover .star.off, .star.off:focus-visible, .drawer-head .star.off { opacity: 1
 .drawer-head .model-id { font-size: 14px; white-space: normal; word-break: break-all; }
 .drawer-body { flex: 1; overflow: auto; padding: 18px 22px 28px; }
 .drawer-foot { padding: 12px 22px; border-top: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+.drawer-foot select.input { width: auto; }
+/* 错误和测试结果显示在底部按钮上方，不随面板内容滚动。 */
+.drawer-msg { flex: none; max-height: 40vh; overflow: auto; padding: 12px 22px 0; border-top: 1px solid var(--line); }
+.drawer-msg:empty { display: none; }
+.drawer .drawer-msg > * { margin: 0; }
+.drawer-msg:not(:empty) + .drawer-foot { border-top: 0; }
 .section-title { font-size: 12px; color: var(--faint); letter-spacing: .04em; margin: 22px 0 10px; }
-#drawer-error + .section-title { margin-top: 0; }
+.drawer-body > .section-title:first-child { margin-top: 0; }
 .kv { display: grid; grid-template-columns: 96px 1fr; gap: 7px 14px; font-size: 13px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; min-width: 0; word-break: break-word; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -217,7 +226,11 @@ tr:hover .star.off, .star.off:focus-visible, .drawer-head .star.off { opacity: 1
 <script>
 "use strict";
 const TOKEN = document.querySelector('meta[name="endpoints-token"]').content;
-const SOURCE = { manual: "手动", server: "服务端", pi: "pi 自带", default: "默认值", native_endpoints: "native_endpoints", owned_by: "owned_by", name: "按名字" };
+const SOURCE = { manual: "手动", server: "服务端", pi: "pi 自带", modelsdev: "models.dev", default: "默认值", native_endpoints: "native_endpoints", owned_by: "owned_by", name: "按名字" };
+// 用颜色点表示的参数来源，按图例里的顺序排列。
+const PARAM_SOURCES = ["server", "pi", "modelsdev", "manual", "default"];
+// models.dev 标的模型类型在界面上的名称，没有列出的类型显示原名。
+const TYPE_LABEL = { decision: "分类模型", image: "图片模型", embedding: "向量模型" };
 const LONG_CONTEXT_BETA = "context-1m-2025-08-07";
 let state = { services: [], apis: [] };
 let current = null; // 当前服务名；"" 表示新建
@@ -230,6 +243,9 @@ const collapsed = new Set(); // 折叠的前缀分组
 const pinned = new Map();
 // 服务名 → 打开页面时这个服务是否停用。左栏按这份记录把停用的服务排在下面：切换开关后服务先留在原处，方便改回来，刷新页面后再挪。
 const parked = new Map();
+// 当前服务里刚在列表或详情里操作过的模型 id。这些模型不受“显示隐藏模型”和协议筛选影响：停用隐藏模型或改了协议后先留在原处，
+// 方便改回来；改了筛选条件、切换服务或刷新页面后再按规则显示。
+const kept = new Set();
 const CARET = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 
 /**
@@ -277,6 +293,8 @@ function byPrefix(a, b) {
 let error = null;
 let toastTimer;
 let serviceDraft = null; // 服务表单里还没保存的内容：{ key: 服务名，新建时为 "", nameTouched, values }
+let keyDraft = null; // 密钥卡片里还没保存的密钥：{ key: 服务名, value }
+let drawerDirty = () => false; // 详情面板的手动设置和打开时是否不同，由 overrideForm() 设置
 const refreshing = new Set(); // 正在刷新目录的服务名
 let stale = false; // 后台刷新改了 state，还没重画
 let pointerDown = false;
@@ -302,7 +320,10 @@ function h(tag, attrs = {}, ...children) {
 
 // 协议和 owned_by 那类来源只在详情里显示文字，表格里只用颜色点表示参数来源。
 const dot = (source) => h("span", { class: `src ${source}`, title: SOURCE[source] ?? source });
-const srcText = (source, label) => h("span", { class: "srctext" }, ["server", "pi", "manual", "default"].includes(source) ? dot(source) : null, label ?? SOURCE[source] ?? source);
+const srcText = (source, label) => h("span", { class: "srctext" }, PARAM_SOURCES.includes(source) ? dot(source) : null, label ?? SOURCE[source] ?? source);
+
+// models.dev 标的模型类型不是 chat 时返回界面上显示的类型名，pi 不能拿这类模型对话。没有类型时按对话模型处理。
+const nonChat = (model) => (model.modelType && model.modelType !== "chat" ? TYPE_LABEL[model.modelType] ?? model.modelType : undefined);
 
 function short(n) {
 	if (typeof n !== "number") return "";
@@ -331,19 +352,20 @@ async function run(path, body, okText) {
 		error = data.refreshError ? `刷新失败：${data.refreshError}` : null;
 		render();
 		refreshDrawerStar();
-		$("#drawer-error")?.replaceChildren();
+		// 操作成功后去掉详情面板里上一次的错误，测试结果保留。
+		if ($("#drawer-msg > .banner.err")) drawerMessage(null);
 		if (okText && !data.refreshError) toast(okText);
 		return data;
 	} catch (failure) {
 		error = failure.message;
 		render();
 		// 详情面板盖住了页面顶部的错误提示，在面板里也显示一份。
-		$("#drawer-error")?.replaceChildren(h("div", { class: "banner err" }, failure.message));
+		drawerMessage(h("div", { class: "banner err" }, failure.message));
 		return undefined;
 	}
 }
 
-// 文字输入框有焦点时不重画：重画会让它失去焦点，还会清掉没保存的密钥。
+// 焦点是否在输入框、文本框或下拉框里。后台刷新这时不重画，重画会让它失去焦点；详情面板这时也不响应 Esc。
 const typing = () => document.activeElement?.matches("textarea, select, input:not([type=checkbox]):not([type=radio])") ?? false;
 
 // 后台刷新的结果等到没在输入、也没按着鼠标时再画，免得点击落在被替换掉的元素上。
@@ -406,9 +428,22 @@ function parseJsonField(text, label) {
 	}
 }
 
-function positiveInt(text, label) {
-	const value = Number(text);
-	if (!Number.isInteger(value) || value <= 0) throw new Error(`${label} 要填正整数`);
+/**
+ * 解析上下文、最大输出这类 token 数。接受 1000000、1,000,000、1 000 000，以及 200K、1M、1.5M 这类写法：
+ * K 是 1000，M 是 1000000，大小写均可，和 short() 显示的单位一致。千位分隔符必须每三位一个，1,5M 这类写法报错。
+ * 结果必须是正整数，认不出时抛出错误。
+ */
+function parseCount(text, label) {
+	const normalized = text.trim().replace(/\s+/g, " ");
+	const match = /^(\d+|\d{1,3}(?:,\d{3})+|\d{1,3}(?: \d{3})+)(?:\.(\d+))? ?([km])?$/i.exec(normalized);
+	let value = NaN;
+	if (match) {
+		const zeros = match[3] ? (match[3].toLowerCase() === "k" ? 3 : 6) : 0;
+		const fraction = match[2] ?? "";
+		// 按字符串移动小数点，避免 1.1 * 1e6 这类浮点误差。
+		if (fraction.length <= zeros) value = Number(match[1].replace(/[, ]/g, "") + fraction.padEnd(zeros, "0"));
+	}
+	if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label}填的“${text.trim()}”不是正整数，可以写 1000000、1,000,000、200K 或 1M`);
 	return value;
 }
 
@@ -420,6 +455,8 @@ function select(item) {
 	openModel = null;
 	error = null;
 	serviceDraft = null;
+	keyDraft = null;
+	kept.clear();
 	render();
 }
 
@@ -485,32 +522,35 @@ function renderHead(item) {
 function matches(model) {
 	const text = view.text.trim().toLowerCase();
 	if (text && !model.id.toLowerCase().includes(text) && !model.name.value.toLowerCase().includes(text)) return false;
-	if (view.api && model.api.value !== view.api) return false;
+	if (view.api && model.api.value !== view.api && !kept.has(model.id)) return false;
 	if (view.owner && (model.ownedBy ?? "") !== view.owner) return false;
-	if (!view.hidden && model.hidden && !model.enabled) return false;
+	if (!view.hidden && model.hidden && !model.enabled && !kept.has(model.id)) return false;
 	return true;
 }
 
 function renderModels(item) {
 	const wrap = h("div");
 	const options = (values, all) => [h("option", { value: "" }, all), ...[...new Set(values)].sort().map((value) => h("option", { value }, value || "（空）"))];
-	const apiFilter = h("select", { class: "input", onchange: (event) => { view.api = event.target.value; renderTable(); } }, options(item.models.map((model) => model.api.value), "全部协议"));
+	// 改了筛选条件后，刚操作过的模型不再留在原处。
+	const refilter = () => { kept.clear(); renderTable(); };
+	const apiFilter = h("select", { class: "input", onchange: (event) => { view.api = event.target.value; refilter(); } }, options(item.models.map((model) => model.api.value), "全部协议"));
 	apiFilter.value = view.api;
-	const ownerFilter = h("select", { class: "input", onchange: (event) => { view.owner = event.target.value; renderTable(); } }, options(item.models.map((model) => model.ownedBy ?? ""), "全部 owned_by"));
+	const ownerFilter = h("select", { class: "input", onchange: (event) => { view.owner = event.target.value; refilter(); } }, options(item.models.map((model) => model.ownedBy ?? ""), "全部 owned_by"));
 	ownerFilter.value = view.owner;
-	const search = h("input", { class: "input", type: "search", value: view.text, placeholder: "搜索模型 id 或名称", oninput: (event) => { view.text = event.target.value; renderTable(); } });
+	const search = h("input", { class: "input", type: "search", value: view.text, placeholder: "搜索模型 id 或名称", oninput: (event) => { view.text = event.target.value; refilter(); } });
 	const count = h("span", { class: "hint", style: "margin:0" });
 	const chips = h("div", { class: "chips" });
 	wrap.append(h("div", { class: "toolbar" },
 		h("div", { class: "search" }, h("span", { html: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>' }), search),
 		apiFilter, ownerFilter,
-		h("label", { class: "check" }, h("input", { type: "checkbox", checked: view.hidden || undefined, onchange: (event) => { view.hidden = event.target.checked; renderTable(); } }), "显示隐藏模型"),
+		h("label", { class: "check" }, h("input", { type: "checkbox", checked: view.hidden || undefined, onchange: (event) => { view.hidden = event.target.checked; refilter(); } }), "显示隐藏模型"),
 		h("span", { class: "spacer" }),
 		count,
 	));
 	const box = h("div");
 	wrap.append(chips, box, h("div", { class: "legend" },
-		h("span", {}, "参数来源："), ...["server", "pi", "manual", "default"].map((source) => h("span", {}, dot(source), SOURCE[source])),
+		h("span", {}, "参数来源："), ...PARAM_SOURCES.map((source) => h("span", {}, dot(source), SOURCE[source])),
+		modelsDevStatus(),
 		h("span", { class: "spacer" }), h("span", {}, "点击查看详情和手动设置"),
 	));
 
@@ -521,8 +561,10 @@ function renderModels(item) {
 		const chip = (value, label, n) => h("button", { class: `chip${view.prefix === value ? " active" : ""}`, onclick: () => {
 			if (value === ENABLED) pinned.set(item.name, new Set(item.models.filter((model) => model.enabled).map((model) => model.id)));
 			view.prefix = value;
-			renderTable();
+			refilter();
 		} }, label, h("span", { class: "n" }, n));
+		// 选中的前缀数量变成 0 时也保留按钮，筛选条件始终看得到，也能点“全部”取消。
+		if (view.prefix && view.prefix !== ENABLED && !counts.has(view.prefix)) counts.set(view.prefix, 0);
 		chips.replaceChildren(
 			chip("", "全部", models.length),
 			chip(ENABLED, "已启用", models.filter((model) => model.enabled).length),
@@ -579,6 +621,17 @@ function renderModels(item) {
 	return wrap;
 }
 
+// 参数来源图例旁边的 models.dev 状态：正在拉取、数据更新时间或失败原因。从没拉过时不显示。
+function modelsDevStatus() {
+	const status = state.modelsDev;
+	if (!status) return null;
+	const time = (ms) => new Date(ms).toLocaleString();
+	if (status.fetching) return h("span", {}, "models.dev 正在拉取…");
+	if (status.error) return h("span", { class: "warn", title: status.fetchedAt ? `沿用 ${time(status.fetchedAt)} 更新的数据` : undefined }, `models.dev 拉取失败：${status.error}`);
+	if (status.fetchedAt) return h("span", { title: status.checkedAt ? `最后检查于 ${time(status.checkedAt)}` : undefined }, `models.dev 数据更新于 ${time(status.fetchedAt)}`);
+	return null;
+}
+
 const isDefault = (item, model) => state.defaultModel?.provider === item.name && state.defaultModel.id === model.id;
 
 // 详情面板不随 render() 重建，免得冲掉没保存的输入，这里单独更新星标。
@@ -597,7 +650,7 @@ const STAR = (filled) => `<svg viewBox="0 0 24 24" width="1em" height="1em" fill
  * 点不了的星不用 disabled：禁用的按钮会吞掉点击，列表行就打不开详情了。
  */
 function star(item, model) {
-	const usable = model.enabled && item.status?.registered;
+	const usable = model.enabled && item.status?.registered && !nonChat(model);
 	if (isDefault(item, model)) {
 		const title = usable ? "pi 默认模型，点击取消" : "pi 默认模型，但它现在没有注册到 pi，pi 启动时会改用别的模型。点击取消";
 		return h("button", { class: `star${usable ? " on" : ""}`, title, onclick: async (event) => {
@@ -606,7 +659,7 @@ function star(item, model) {
 		}, html: STAR(true) });
 	}
 	if (!usable) {
-		const title = !model.enabled ? "先启用这个模型，才能设为 pi 默认模型" : "服务没有注册到 pi，不能设为默认模型";
+		const title = nonChat(model) ? "pi 不能拿这个模型对话，不能设为默认模型" : !model.enabled ? "先启用这个模型，才能设为 pi 默认模型" : "服务没有注册到 pi，不能设为默认模型";
 		return h("button", { class: "star off", title, "aria-disabled": "true", html: STAR(false) });
 	}
 	return h("button", { class: "star off", title: "设为 pi 默认模型", onclick: async (event) => {
@@ -615,18 +668,36 @@ function star(item, model) {
 	}, html: STAR(false) });
 }
 
+/**
+ * 模型的启用开关。pi 不能拿来对话的模型没启用时不能启用，已经启用的可以停用。
+ * 点不了的开关不用 disabled：禁用的控件会吞掉点击，列表行就打不开详情了。
+ */
+function enableSwitch(model, attrs, onchange) {
+	const type = nonChat(model);
+	if (type && !model.enabled) {
+		return h("input", { ...attrs, type: "checkbox", class: "switch", title: `${type}，pi 不能拿它对话，不能启用`, "aria-disabled": "true", onclick: (event) => event.preventDefault() });
+	}
+	return h("input", { ...attrs, type: "checkbox", class: "switch", title: model.enabled ? "已启用" : "未启用", checked: model.enabled || undefined, onchange: (event) => {
+		// 刚操作过的模型先留在原处，停用隐藏模型后不会立刻从列表里消失。
+		kept.add(model.id);
+		onchange(event);
+	} });
+}
+
 function modelRow(item, model) {
 	const needsFix = model.contextWindow.source === "default" || model.maxTokens.source === "default";
+	const type = nonChat(model);
 	return h("tr", { class: openModel === model.id ? "open" : "", onclick: (event) => {
-		if (event.target.closest("input, button:not([aria-disabled])")) return;
+		if (event.target.closest("input:not([aria-disabled]), button:not([aria-disabled])")) return;
 		openModel = model.id;
 		renderDrawer();
 		render();
 	} },
-		h("td", { class: "toggle" }, h("input", { type: "checkbox", class: "switch", title: model.enabled ? "已启用" : "未启用", checked: model.enabled || undefined, onchange: (event) => run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }) })),
+		h("td", { class: "toggle" }, enableSwitch(model, {}, (event) => run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }))),
 		h("td", { title: `${model.id}\n${model.name.value}` },
 			h("div", { class: "model-id" }, h("span", { class: "id" }, model.id), star(item, model),
-				model.hidden ? h("span", { class: "tag" }, "隐藏") : null,
+				type ? h("span", { class: "tag", title: "pi 不能拿它对话" }, type) : null,
+				model.hidden && !type ? h("span", { class: "tag" }, "隐藏") : null,
 				model.missing ? h("span", { class: "tag warn" }, "目录里没有") : null,
 				needsFix ? h("span", { class: "tag warn" }, "缺参数") : null,
 				Object.keys(model.override).length ? h("span", { class: "tag accent" }, "手动") : null),
@@ -646,25 +717,42 @@ function renderDrawer() {
 	const item = service();
 	const model = item?.models.find((entry) => entry.id === openModel);
 	if (!model) {
+		drawerDirty = () => false;
 		root.replaceChildren();
 		return;
 	}
-	const close = () => { openModel = null; renderDrawer(); render(); };
+	const toggle = enableSwitch(model, { style: "margin-top:4px" }, async (event) => {
+		// 详情面板不随 render() 重建，失败时自己把开关拨回去。
+		const data = await run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked });
+		if (!data) event.target.checked = !event.target.checked;
+		// 停用了 pi 不能拿来对话的模型后，开关换成不能再启用的样子。
+		else if (nonChat(model) && !event.target.checked) toggle.replaceWith(enableSwitch({ ...model, enabled: false }, { style: "margin-top:4px" }));
+	});
 	root.replaceChildren(
-		h("div", { class: "scrim", onclick: close }),
+		h("div", { class: "scrim", onclick: closeDrawer }),
 		h("div", { class: "drawer" },
 			h("div", { class: "drawer-head" },
-				h("input", { type: "checkbox", class: "switch", style: "margin-top:4px", title: "启用", checked: model.enabled || undefined, onchange: async (event) => {
-					// 详情面板不随 render() 重建，失败时自己把开关拨回去。
-					if (!(await run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked }))) event.target.checked = !event.target.checked;
-				} }),
+				toggle,
 				h("div", { class: "grow" }, h("div", { class: "model-id" }, model.id), h("div", { class: "model-name" }, model.name.value)),
 				h("span", { id: "drawer-star" }, star(item, model)),
-				h("button", { class: "close", title: "关闭", onclick: close }, "×"),
+				h("button", { class: "close", title: "关闭", onclick: closeDrawer }, "×"),
 			),
 			...overrideForm(item, model),
 		),
 	);
+}
+
+// 手动设置有没保存的修改时，关闭前先确认。
+function closeDrawer() {
+	if (drawerDirty() && !confirm("放弃没保存的修改？")) return;
+	openModel = null;
+	renderDrawer();
+	render();
+}
+
+// 详情面板底部按钮上方的提示区，显示错误和测试结果。传入 null 时清空。
+function drawerMessage(node) {
+	$("#drawer-msg")?.replaceChildren(...(node ? [node] : []));
 }
 
 function overrideForm(item, model) {
@@ -682,16 +770,23 @@ function overrideForm(item, model) {
 			model.betas.includes(LONG_CONTEXT_BETA) ? h("span", { class: "srctext" }, "上下文超过 200K 时自动申请 1M") : null);
 	}
 	if (model.headers) fact("请求头", h("span", { class: "mono", style: "font-size:12px" }, JSON.stringify(model.headers)));
+	// 每个 compat 字段的来源取自 compatSources。服务端没有给出时，按整体来源推算：Anthropic 协议的会话亲和字段没有手动设置时来自默认值。
 	const affinityDefault = model.api.value === "anthropic-messages" && o.compat?.sendSessionAffinityHeaders == null;
-	const compatTags = Object.entries(model.compat.value ?? {}).map(([key, value]) => {
-		const source = key === "sendSessionAffinityHeaders" && affinityDefault ? "default" : model.compat.source;
-		return h("span", { class: "tag mono", style: "margin:0", title: `来源：${SOURCE[source]}` }, value === true ? key : `${key}: ${JSON.stringify(value)}`);
-	});
-	const compatSource = affinityDefault && model.compat.source !== "default" ? `${SOURCE[model.compat.source]} + 默认值` : undefined;
-	fact("compat", ...(compatTags.length ? compatTags : ["无"]), srcText(model.compat.source, compatSource));
+	const compatSourceOf = (key) => model.compatSources?.[key] ?? (key === "sendSessionAffinityHeaders" && affinityDefault ? "default" : model.compat.source);
+	const compatTags = Object.entries(model.compat.value ?? {}).map(([key, value]) =>
+		h("span", { class: "tag mono", style: "margin:0", title: `来源：${SOURCE[compatSourceOf(key)] ?? compatSourceOf(key)}` }, value === true ? key : `${key}: ${JSON.stringify(value)}`));
+	// 手动 compat 里值为 null 的字段表示删掉，加删除线显示。
+	const removed = Object.entries(o.compat ?? {}).filter(([, value]) => value === null).map(([key]) => key);
+	const removedTags = removed.map((key) => h("span", { class: "tag mono del", style: "margin:0", title: "手动删除" }, key));
+	const usedSources = new Set(Object.keys(model.compat.value ?? {}).map(compatSourceOf));
+	if (removed.length) usedSources.add("manual");
+	const mixed = usedSources.size > 1 || (usedSources.size === 1 && !usedSources.has(model.compat.source));
+	const compatLabel = mixed ? ["manual", "pi", "default"].filter((source) => usedSources.has(source)).map((source) => SOURCE[source]).join(" + ") : undefined;
+	fact("compat", ...(compatTags.length || removedTags.length ? [...compatTags, ...removedTags] : ["无"]), srcText(model.compat.source, compatLabel));
 	const price = model.cost.value;
 	fact("价格", h("span", { class: "num" }, `输入 $${price.input} · 输出 $${price.output} · 缓存读 $${price.cacheRead} · 缓存写 $${price.cacheWrite}（每百万 token）`), srcText(model.cost.source));
 	if (model.builtin) fact("pi 自带目录", h("span", { class: "mono", style: "font-size:12px" }, model.builtin));
+	if (model.modelsDev) fact("models.dev", h("span", { class: "mono", style: "font-size:12px" }, model.modelsDev));
 
 	const form = h("div", { class: "form" });
 	const field = (label, input, hint) => form.append(h("label", {}, label), h("div", {}, input, hint ? h("div", { class: "hint" }, hint) : null));
@@ -702,10 +797,12 @@ function overrideForm(item, model) {
 	field("协议", apiSelect);
 	const baseUrl = h("input", { class: "input", type: "text", value: o.baseUrl ?? "", placeholder: "自动：按协议拼接" });
 	field("地址", baseUrl);
-	const ctx = h("input", { class: "input", type: "number", value: o.contextWindow ?? "", placeholder: String(model.contextWindow.value) });
-	field("上下文", ctx, model.betas.includes(LONG_CONTEXT_BETA) ? "超过 200000 时自动带上 context-1m beta；不想要就填 200000" : null);
-	const max = h("input", { class: "input", type: "number", value: o.maxTokens ?? "", placeholder: String(model.maxTokens.value) });
-	field("最大输出", max);
+	// 用普通文本框：Safari 和 Firefox 的 number 框遇到 1,000,000 或 1M 时读出空值，会被当成没填。由 parseCount() 解析。
+	const countHint = "可以写 1000000、1,000,000、200K 或 1M";
+	const ctx = h("input", { class: "input", type: "text", value: o.contextWindow ?? "", placeholder: String(model.contextWindow.value) });
+	field("上下文", ctx, model.betas.includes(LONG_CONTEXT_BETA) ? `${countHint}。超过 200000 时自动带上 context-1m beta；不想要就填 200000` : countHint);
+	const max = h("input", { class: "input", type: "text", value: o.maxTokens ?? "", placeholder: String(model.maxTokens.value) });
+	field("最大输出", max, countHint);
 	const input = h("select", { class: "input" }, h("option", { value: "" }, "自动"), h("option", { value: "text" }, "仅文本"), h("option", { value: "text,image" }, "文本和图片"));
 	input.value = o.input ? o.input.join(",") : "";
 	field("输入", input);
@@ -716,25 +813,29 @@ function overrideForm(item, model) {
 	const headers = h("textarea", { class: "input", placeholder: '例如 {"X-Title": "pi"}' });
 	headers.value = o.headers ? JSON.stringify(o.headers, null, 2) : "";
 	field("请求头", headers, "Anthropic 协议的 anthropic-beta 会追加到 pi 自己的 beta 列表里");
-	const compat = h("textarea", { class: "input", placeholder: "自动：按原厂从 pi 自带目录抄" });
+	const compat = h("textarea", { class: "input", placeholder: '只写要改的字段，例如 {"supportsStore": false}' });
 	compat.value = o.compat ? JSON.stringify(o.compat, null, 2) : "";
-	field("compat", compat, model.api.value === "anthropic-messages" ? "sendSessionAffinityHeaders 默认开启；设为 false 可关闭会话亲和请求头" : null);
+	const compatHint = "只写要改的字段，其余照常从 pi 自带目录取；写 null 表示删掉这个字段";
+	field("compat", compat, model.api.value === "anthropic-messages" ? `${compatHint}。sendSessionAffinityHeaders 默认开启；设为 false 可关闭会话亲和请求头` : compatHint);
 	const cost = h("textarea", { class: "input", placeholder: '每百万 token 的美元价格，例如 {"input": 2, "output": 10}' });
 	cost.value = o.cost ? JSON.stringify(o.cost, null, 2) : "";
 	field("价格", cost);
 
-	const result = h("div");
+	// 测试消息的思考档位，默认不设置。模型不支持调节思考时不显示。
+	const testLevels = model.levels.filter((level) => level !== "off");
+	const testLevel = testLevels.length ? h("select", { class: "input", title: "测试消息的思考档位" }, h("option", { value: "" }, "不设置"), ...testLevels.map((level) => h("option", { value: level }, level))) : null;
 	const testButton = h("button", { class: "btn", onclick: async () => {
 		testButton.disabled = true;
 		testButton.textContent = "测试中…";
 		try {
-			const data = await api("testModel", { name: item.name, id: model.id });
+			const data = await api("testModel", { name: item.name, id: model.id, ...(testLevel?.value ? { thinkingLevel: testLevel.value } : {}) });
 			const test = data.test;
-			result.replaceChildren(h("div", { class: `result ${test.ok ? "ok" : "err"}` },
-				`${test.ok ? "成功" : "失败"} · ${test.request.api} ${test.request.baseUrl} · ${(test.durationMs / 1000).toFixed(1)} 秒 · stopReason: ${test.stopReason}\n`,
+			const level = test.request.thinkingLevel ? ` · 思考档位 ${test.request.thinkingLevel}` : "";
+			drawerMessage(h("div", { class: `result ${test.ok ? "ok" : "err"}` },
+				`${test.ok ? "成功" : "失败"} · ${test.request.api} ${test.request.baseUrl}${level} · ${(test.durationMs / 1000).toFixed(1)} 秒 · stopReason: ${test.stopReason}\n`,
 				test.ok ? `回复：${test.text}` : test.error || "没有返回错误信息"));
 		} catch (failure) {
-			result.replaceChildren(h("div", { class: "result err" }, failure.message));
+			drawerMessage(h("div", { class: "result err" }, failure.message));
 		} finally {
 			testButton.disabled = false;
 			testButton.textContent = "发送测试消息";
@@ -748,8 +849,8 @@ function overrideForm(item, model) {
 			if (name.value.trim()) override.name = name.value.trim();
 			if (apiSelect.value) override.api = apiSelect.value;
 			if (baseUrl.value.trim()) override.baseUrl = baseUrl.value.trim().replace(/\/+$/, "");
-			if (ctx.value) override.contextWindow = positiveInt(ctx.value, "上下文");
-			if (max.value) override.maxTokens = positiveInt(max.value, "最大输出");
+			if (ctx.value.trim()) override.contextWindow = parseCount(ctx.value, "上下文");
+			if (max.value.trim()) override.maxTokens = parseCount(max.value, "最大输出");
 			if (input.value) override.input = input.value.split(",");
 			if (levels.value.trim()) {
 				const list = levels.value.split(/[\s,，]+/).map((level) => level.trim().toLowerCase()).filter(Boolean);
@@ -762,27 +863,38 @@ function overrideForm(item, model) {
 			const parsedCost = parseJsonField(cost.value, "价格");
 			if (parsedCost) override.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...parsedCost };
 		} catch (failure) {
-			result.replaceChildren(h("div", { class: "result err" }, failure.message));
+			drawerMessage(h("div", { class: "banner err" }, failure.message));
 			return;
 		}
+		// 改了协议等参数后，模型先留在列表里的原处。
+		kept.add(model.id);
 		if (await run("setOverride", { name: item.name, id: model.id, override }, "手动设置已保存")) renderDrawer();
 	};
 
+	// 打开时记下表单的值，关闭面板时和当前的值比较。测试消息的档位不算修改。
+	const inputs = [name, apiSelect, baseUrl, ctx, max, input, levels, headers, compat, cost];
+	const snapshot = () => JSON.stringify(inputs.map((element) => element.value));
+	const initial = snapshot();
+	drawerDirty = () => snapshot() !== initial;
+
+	const type = nonChat(model);
 	return [
 		h("div", { class: "drawer-body" },
-			h("div", { id: "drawer-error" }),
+			type ? h("div", { class: "banner warn" }, `models.dev 标注这是${TYPE_LABEL[model.modelType] ? type : ` ${type} 类型的模型`}，pi 不能拿它对话。${model.enabled ? "它不会注册到 pi，可以停用。" : "不能启用。"}`) : null,
 			h("div", { class: "section-title" }, "生效的参数"),
 			effective,
 			h("div", { class: "section-title" }, "手动设置 · 留空的项自动取值"),
 			form,
-			result,
 		),
+		h("div", { id: "drawer-msg", class: "drawer-msg" }),
 		h("div", { class: "drawer-foot" },
 			h("button", { class: "btn primary", onclick: save }, "保存"),
 			h("button", { class: "btn", disabled: Object.keys(o).length ? undefined : true, onclick: async () => {
+				kept.add(model.id);
 				if (await run("setOverride", { name: item.name, id: model.id }, "已清除手动设置")) renderDrawer();
 			} }, "清除手动设置"),
 			h("span", { class: "spacer" }),
+			testLevel,
 			testButton,
 		),
 	];
@@ -864,12 +976,20 @@ function keyInput(placeholder) {
 function renderKey(item) {
 	const status = item.status;
 	const input = keyInput(status?.keySource ? "已设置，输入新密钥可替换" : "输入密钥");
+	// 保存失败或后台刷新时整页会重画，密钥框从 keyDraft 恢复刚填的内容。
+	if (keyDraft?.key === item.name) input.value = keyDraft.value;
+	input.addEventListener("input", () => { keyDraft = { key: item.name, value: input.value }; });
 	const text = status?.keySource === "env" ? `已设置，来自环境变量 ${item.apiKeyEnv}，优先于文件里的密钥` : status?.keySource === "file" ? "已设置，保存在本机文件" : "未设置";
 	return h("div", { class: "card" },
 		h("h3", {}, "密钥 ", h("span", { class: `pill ${status?.keySource ? "on" : "warn"}`, style: "margin-left:6px" }, text)),
 		h("div", { class: "key-row" },
 			input,
-			h("button", { class: "btn", onclick: async () => { if (input.value.trim()) await run("setKey", { name: item.name, apiKey: input.value }, "密钥已保存"); } }, "保存密钥"),
+			h("button", { class: "btn", onclick: async () => {
+				if (input.value.trim() && (await run("setKey", { name: item.name, apiKey: input.value }, "密钥已保存"))) {
+					keyDraft = null;
+					render();
+				}
+			} }, "保存密钥"),
 			h("button", { class: "btn danger", disabled: !status?.keySource || status.keySource === "env" ? true : undefined, onclick: async () => {
 				if (confirm("清除文件里保存的密钥？")) await run("setKey", { name: item.name, apiKey: "" }, "密钥已清除");
 			} }, "清除"),
@@ -887,6 +1007,8 @@ function renderDanger(item) {
 			if (await run("removeService", { name: item.name }, "已删除")) {
 				parked.delete(item.name);
 				serviceDraft = null;
+				keyDraft = null;
+				kept.clear();
 				current = firstService();
 				tab = "models";
 				openModel = null;
@@ -926,9 +1048,12 @@ function render() {
 	content.replaceChildren(...parts);
 }
 
-$("#add").addEventListener("click", () => { current = ""; openModel = null; error = null; serviceDraft = null; renderDrawer(); render(); });
+$("#add").addEventListener("click", () => { current = ""; openModel = null; error = null; serviceDraft = null; keyDraft = null; kept.clear(); renderDrawer(); render(); });
 document.addEventListener("keydown", (event) => {
-	if (event.key === "Escape" && openModel) { openModel = null; renderDrawer(); render(); }
+	if (event.key !== "Escape" || !openModel) return;
+	// 输入法选字时的 Esc 用来取消选字；焦点在输入框里时也不关闭面板，免得误触丢掉输入。
+	if (event.isComposing || event.keyCode === 229 || typing()) return;
+	closeDrawer();
 });
 
 // 版本号右边的绿色箭头表示 npm 上有新版，点击打开 Release 页面。检查失败时不显示。
