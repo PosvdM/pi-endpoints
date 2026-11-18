@@ -160,6 +160,34 @@ describe("管理页的操作", () => {
 		expect(state.services[0].models[0].compat).toEqual({ value: { sendSessionAffinityHeaders: false }, source: "manual" });
 	});
 
+	it("打开“每系最新”后立刻调整并返回状态，之后刷新目录时自动换成新版", async () => {
+		let ids = ["gpt-6-sol", "gpt-6.1-sol"];
+		// models.dev 没有数据时“每系最新”会推迟，这里给它一份能用的数据。
+		const modelsDev = { moonshotai: { id: "moonshotai", models: { "kimi-k9": { limit: { context: 1000, output: 100 } } } } };
+		vi.stubGlobal("fetch", async (url: string) =>
+			new Response(
+				JSON.stringify(
+					url === MODELS_DEV_URL ? modelsDev : url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) },
+				),
+			),
+		);
+		await call("/api/saveService", { service: { name: "relay", baseUrl: "https://relay.test" } });
+		await call("/api/setKey", { name: "relay", apiKey: "sk-1" });
+		await call("/api/refresh", { name: "relay" });
+		await call("/api/setEnabled", { name: "relay", id: "gpt-6-sol", enabled: true });
+
+		let state = await (await call("/api/setLatestPerFamily", { name: "relay", latestPerFamily: true })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		expect(state.services[0].models.filter((model: { enabled: boolean }) => model.enabled).map((model: { id: string }) => model.id)).toEqual(["gpt-6.1-sol"]);
+
+		ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		state = await (await call("/api/refresh", { name: "relay" })).json();
+		expect(state.services[0].models.filter((model: { enabled: boolean }) => model.enabled).map((model: { id: string }) => model.id)).toEqual(["gpt-6.2-sol"]);
+
+		state = await (await call("/api/setLatestPerFamily", { name: "relay", latestPerFamily: false })).json();
+		expect(state.services[0].latestPerFamily).toBe(false);
+	});
+
 	it("刷新失败时返回服务端原文", async () => {
 		vi.stubGlobal("fetch", async () => new Response('{"error":"Invalid token"}', { status: 401 }));
 		await call("/api/saveService", { service: { name: "relay", baseUrl: "https://relay.test" } });
@@ -285,9 +313,20 @@ describe("pi 默认模型", () => {
 	it("取消时删掉默认模型，保留其他设置", async () => {
 		writeFileSync(settingsFile(), JSON.stringify({ defaultThinkingLevel: "high", enabledModels: ["relay/model-x"] }));
 		await call("/api/setDefaultModel", { name: "relay", id: "model-x" });
-		const state = await (await call("/api/clearDefaultModel", {})).json();
+		const state = await (await call("/api/clearDefaultModel", { name: "relay", id: "model-x" })).json();
 		expect(state.defaultModel).toBeUndefined();
+		expect(state.defaultChanged).toBeUndefined();
 		expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ defaultThinkingLevel: "high", enabledModels: ["relay/model-x"] });
+	});
+
+	it("页面带的默认模型和当前的不一致时不清除，返回最新状态", async () => {
+		await call("/api/setDefaultModel", { name: "relay", id: "model-x" });
+		const before = readFileSync(settingsFile(), "utf8");
+		const state = await (await call("/api/clearDefaultModel", { name: "relay", id: "old-model" })).json();
+		expect(state.defaultChanged).toBe(true);
+		expect(state.defaultModel).toEqual({ provider: "relay", id: "model-x" });
+		expect(readFileSync(settingsFile(), "utf8")).toBe(before);
+		expect((await call("/api/clearDefaultModel", {})).status).toBe(400);
 	});
 
 	it("没启用的模型和停用的服务不能设为默认", async () => {

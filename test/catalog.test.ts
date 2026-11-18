@@ -107,6 +107,7 @@ describe("fetchCatalog", () => {
 		const catalog = await fetchCatalog("https://x.test", "k");
 		expect(calls).toEqual(["https://x.test/v1/models", "https://x.test/v1/models?client_version=pi"]);
 		expect(catalog.codex).toBe(false);
+		expect(catalog.baseUrl).toBe("https://x.test");
 		expect(catalog.models).toEqual([{ id: "m", ownedBy: "o" }]);
 	});
 

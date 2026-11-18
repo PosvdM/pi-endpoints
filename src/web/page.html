@@ -178,6 +178,8 @@ tr:hover .star.off, .star.off:focus-visible, .drawer-head .star.off { opacity: 1
 .hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
 .actions { display: flex; gap: 8px; align-items: center; margin-top: 18px; }
 .key-row { display: flex; gap: 8px; }
+.card h3.switch-title { display: flex; gap: 10px; align-items: center; }
+.switch-title label { cursor: pointer; }
 
 /* 详情抽屉 */
 .scrim { position: fixed; inset: 0; background: rgba(10, 12, 16, .28); z-index: 10; }
@@ -334,6 +336,18 @@ function short(n) {
 }
 const full = (n) => (typeof n === "number" ? n.toLocaleString() : "");
 
+// 换成服务端返回的新状态。“已启用”页只列点按钮时已启用的模型，自动启用的新版本（“每系最新”）也补进去；
+// 被换掉的旧版本照常留着，方便回看。
+function setState(data) {
+	for (const item of data.services) {
+		const shown = pinned.get(item.name);
+		if (!shown) continue;
+		const before = new Set(state.services.find((entry) => entry.name === item.name)?.models.filter((model) => model.enabled).map((model) => model.id));
+		for (const model of item.models) if (model.enabled && !before.has(model.id)) shown.add(model.id);
+	}
+	state = data;
+}
+
 async function api(path, body) {
 	const response = await fetch(`/api/${path}`, {
 		method: body === undefined ? "GET" : "POST",
@@ -348,10 +362,10 @@ async function api(path, body) {
 async function run(path, body, okText) {
 	try {
 		const data = await api(path, body);
-		if (data.services) state = data;
+		if (data.services) setState(data);
 		error = data.refreshError ? `刷新失败：${data.refreshError}` : null;
 		render();
-		refreshDrawerStar();
+		refreshDrawerHead();
 		// 操作成功后去掉详情面板里上一次的错误，测试结果保留。
 		if ($("#drawer-msg > .banner.err")) drawerMessage(null);
 		if (okText && !data.refreshError) toast(okText);
@@ -373,7 +387,7 @@ function flush() {
 	if (!stale || pointerDown || typing()) return;
 	stale = false;
 	render();
-	refreshDrawerStar();
+	refreshDrawerHead();
 }
 document.addEventListener("pointerdown", () => { pointerDown = true; }, true);
 // 等这次点击处理完再画。
@@ -388,7 +402,7 @@ async function refreshInBackground(name) {
 	flush();
 	try {
 		const data = await api("refresh", { name });
-		if (data.services) state = data;
+		if (data.services) setState(data);
 	} catch {
 		// 连不上管理页本身（如 pi 已退出）时不打扰，手动刷新会显示原因。
 	} finally {
@@ -634,11 +648,18 @@ function modelsDevStatus() {
 
 const isDefault = (item, model) => state.defaultModel?.provider === item.name && state.defaultModel.id === model.id;
 
-// 详情面板不随 render() 重建，免得冲掉没保存的输入，这里单独更新星标。
-function refreshDrawerStar() {
+// 详情面板不随 render() 重建，免得冲掉没保存的输入，这里单独更新星标和启用开关。“每系最新”可能在刷新时停用或启用面板里的模型；
+// 被停用、又已经不在目录里的模型不再出现在状态里，开关按未启用显示。
+function refreshDrawerHead() {
 	const item = service();
 	const model = item?.models.find((entry) => entry.id === openModel);
-	if (model) $("#drawer-star")?.replaceChildren(star(item, model));
+	// 模型已经不在状态里时清掉星标：它可能还显示着旧的默认模型，点了会清掉刚换上的新默认模型。
+	$("#drawer-star")?.replaceChildren(...(model ? [star(item, model)] : []));
+	const toggle = $("#drawer-toggle");
+	if (openModel && toggle && !toggle.hasAttribute("aria-disabled")) {
+		toggle.checked = Boolean(model?.enabled);
+		toggle.title = toggle.checked ? "已启用" : "未启用";
+	}
 }
 
 // 用 SVG 画星，字符 ★ 在部分系统上显示成彩色 emoji，颜色不受 CSS 控制。
@@ -655,7 +676,9 @@ function star(item, model) {
 		const title = usable ? "pi 默认模型，点击取消" : "pi 默认模型，但它现在没有注册到 pi，pi 启动时会改用别的模型。点击取消";
 		return h("button", { class: `star${usable ? " on" : ""}`, title, onclick: async (event) => {
 			event.stopPropagation();
-			await run("clearDefaultModel", {}, "已取消 pi 默认模型，运行中的 pi 需执行 /reload");
+			// 带上这颗星代表的模型：默认模型已经被换掉时服务端不清除，只返回最新状态。
+			const data = await run("clearDefaultModel", { name: item.name, id: model.id });
+			if (data) toast(data.defaultChanged ? "pi 默认模型已经换了，没有取消，页面已更新" : "已取消 pi 默认模型，运行中的 pi 需执行 /reload");
 		}, html: STAR(true) });
 	}
 	if (!usable) {
@@ -721,12 +744,12 @@ function renderDrawer() {
 		root.replaceChildren();
 		return;
 	}
-	const toggle = enableSwitch(model, { style: "margin-top:4px" }, async (event) => {
+	const toggle = enableSwitch(model, { style: "margin-top:4px", id: "drawer-toggle" }, async (event) => {
 		// 详情面板不随 render() 重建，失败时自己把开关拨回去。
 		const data = await run("setEnabled", { name: item.name, id: model.id, enabled: event.target.checked });
 		if (!data) event.target.checked = !event.target.checked;
 		// 停用了 pi 不能拿来对话的模型后，开关换成不能再启用的样子。
-		else if (nonChat(model) && !event.target.checked) toggle.replaceWith(enableSwitch({ ...model, enabled: false }, { style: "margin-top:4px" }));
+		else if (nonChat(model) && !event.target.checked) toggle.replaceWith(enableSwitch({ ...model, enabled: false }, { style: "margin-top:4px", id: "drawer-toggle" }));
 	});
 	root.replaceChildren(
 		h("div", { class: "scrim", onclick: closeDrawer }),
@@ -998,6 +1021,18 @@ function renderKey(item) {
 	);
 }
 
+// 开关立即生效，不属于服务表单，没有未保存的内容需要在重画时保留。
+function renderLatest(item) {
+	const toggle = h("input", { type: "checkbox", class: "switch", id: "latest-per-family", checked: item.latestPerFamily, onchange: async (event) => {
+		const on = event.target.checked;
+		if (!(await run("setLatestPerFamily", { name: item.name, latestPerFamily: on }, on ? "已开启" : "已关闭"))) event.target.checked = !on;
+	} });
+	return h("div", { class: "card" },
+		h("h3", { class: "switch-title" }, toggle, h("label", { for: "latest-per-family" }, "每个系列只保留最新版")),
+		h("div", { class: "hint", style: "margin:0" }, "开启后，已启用模型所在的每个系列只保留最新版，目录里出了新版本会自动启用、并停用旧版本；手动启用的旧版本也会在下次刷新时被换掉。同一版本的多个 id（如别名和带日期的版本）可以同时保留。"),
+	);
+}
+
 function renderDanger(item) {
 	return h("div", { class: "card danger" },
 		h("h3", {}, "删除服务"),
@@ -1034,6 +1069,7 @@ function render() {
 		parts.push(renderHead(item));
 		// 刷新失败时页面顶部已经显示了同样的原因，关掉顶部提示后再显示这一条。
 		if (item.status?.error && error !== `刷新失败：${item.status.error}`) parts.push(h("div", { class: "banner err" }, `错误：${item.status.error}`));
+		if (item.status?.syncError) parts.push(h("div", { class: "banner err" }, `配置已保存，但没能更新运行中的 pi：${item.status.syncError}。请在 pi 里运行 /reload。`));
 		if (!item.status?.keySource) {
 			parts.push(h("div", { class: "banner warn" }, h("span", { class: "grow" }, "还没有设置密钥，模型不会注册到 pi。"),
 				h("button", { class: "btn small", onclick: () => { tab = "settings"; render(); } }, "去设置")));
@@ -1043,7 +1079,7 @@ function render() {
 			h("button", { class: `tab${tab === "settings" ? " active" : ""}`, onclick: () => { tab = "settings"; openModel = null; renderDrawer(); render(); } }, "服务设置"),
 		));
 		if (tab === "models") parts.push(renderModels(item));
-		else parts.push(renderKey(item), renderServiceForm(item), renderDanger(item));
+		else parts.push(renderKey(item), renderServiceForm(item), renderLatest(item), renderDanger(item));
 	}
 	content.replaceChildren(...parts);
 }

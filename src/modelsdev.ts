@@ -297,6 +297,11 @@ function due(now: number): boolean {
 	return !data || now - data.checkedAt >= CHECK_INTERVAL_MS;
 }
 
+/** 本进程里有没有 models.dev 数据：读到过有效的本地文件，或者下载成功过。“每系最新”没有它时推迟。 */
+export function hasModelsDevData(): boolean {
+	return data !== undefined;
+}
+
 /**
  * 到期时拉取 models.dev。同一进程里同时只发一个请求，并发的调用共用同一个结果。
  * 不会失败，失败原因记在 `modelsDevStatus().error`。返回模型数据有没有变化。

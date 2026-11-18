@@ -6,15 +6,16 @@
 
 | 文件 | 职责 |
 |---|---|
-| `src/index.ts` | 插件入口。加载时用配置和缓存注册服务商，再注册命令，不访问网络。 |
+| `src/index.ts` | 插件入口。加载时用配置和缓存注册服务商，再注册命令，不访问网络；记下会话的 `ctx`，供“每系最新”换掉模型时在界面上提示。 |
 | `src/config.ts` | 配置、密钥、目录缓存和 models.dev 四个文件的路径和读写，前三个文件的类型；决定交给 pi 的 `apiKey` 写法。 |
 | `src/catalog.ts` | 请求和解析服务端模型目录。 |
 | `src/builtin.ts` | 在 pi 自带的模型目录里按名字查模型，判断模型原厂。 |
-| `src/modelsdev.ts` | 下载 models.dev 目录、保存本地文件、映射成 pi 的参数，按名字查模型；判断是否到了下载时间。 |
+| `src/modelsdev.ts` | 下载 models.dev 目录、保存本地文件、映射成 pi 的参数，按名字查模型；判断本进程有没有 models.dev 数据。 |
 | `src/resolve.ts` | 把目录、pi 自带目录、models.dev 和手动设置合并成 pi 的模型配置，记录每个值的来源；选择协议；生成 `thinkingLevelMap`；合并 compat。 |
 | `src/betas.ts` | 决定 Anthropic 协议的模型要追加哪些 beta，并在请求体上追加。 |
-| `src/defaults.ts` | 用 pi 的 `SettingsManager` 读写 pi 的默认模型。 |
-| `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、判断是否需要 models.dev、修改配置。 |
+| `src/defaults.ts` | 用 pi 的 `SettingsManager` 读写 pi 的默认模型，把默认模型和 Ctrl+P 列表里的旧模型换成新模型；这些读改写在进程内排队执行。 |
+| `src/family.ts` | “每系最新”的纯函数：从模型 id 认出系列和版本，算出要启用的新版和要停用的旧版。 |
+| `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、执行“每系最新”、判断是否需要 models.dev、修改配置。 |
 | `src/commands.ts` | `/endpoints` 命令：启动管理页并打开浏览器。插件只有这一个命令，所有操作都在管理页里完成。 |
 | `src/version.ts` | 插件版本号，以及到 npm 检查有没有新版本。 |
 | `src/web/server.ts` | 管理页的 HTTP 服务和接口。 |
@@ -24,8 +25,8 @@
 
 1. 插件加载时，`Endpoints` 读取 `endpoints.json`、`endpoints-auth.json`、`endpoints-cache.json` 和 `endpoints-modelsdev.json`，对每个服务调用 `register()`，不访问网络。配置或密钥文件读不了时，把原因记在 `loadError`，按空配置继续加载，命令照常注册。
 2. `register()` 用 `resolveService()` 合并出所有模型，筛出已启用的对话模型，调用 `pi.registerProvider(name, ProviderConfig)`。服务没有密钥或没有可注册的模型时改为注销。
-3. pi 调用服务商的 `refreshModels` 时（交互模式和 RPC 模式启动后、打开 `/model` 时），如果 `context.allowNetwork` 为真，就请求服务端目录、写缓存，然后返回最新的模型列表，由 pi 替换已注册的模型。目录请求结束后（成功或失败），在后台调用 `Endpoints.updateModelsDev()`，不等它完成；拿到新的 models.dev 数据后调用 `registerAll()`。`registerProvider` 会让 pi 以 `allowNetwork: false` 再调用一次 `refreshModels`，这时不刷新目录，也不会再触发 models.dev 更新，所以不会循环。
-4. 管理页的 `refresh` 和新建服务时的首次刷新，在目录请求结束后同样调用 `updateModelsDev()`，但等它完成再返回状态。
+3. pi 调用服务商的 `refreshModels` 时（交互模式和 RPC 模式启动后、打开 `/model` 时），如果 `context.allowNetwork` 为真，就请求服务端目录、写缓存、执行[每系最新](#每系最新)（只改磁盘），然后按内存里的配置返回模型列表，由 pi 替换已注册的模型。目录请求结束后（成功或失败），在后台调用 `Endpoints.updateModelsDev()`，不等它完成；拿到新的 models.dev 数据后调用 `registerAll()`。`registerProvider` 会让 pi 以 `allowNetwork: false` 再调用一次 `refreshModels`，这时不刷新目录，也不会再触发 models.dev 更新，所以不会循环。
+4. 管理页的 `refresh`（包括打开页面时的后台刷新）和新建服务时的首次刷新调用 `refreshForPage()`：先像修改操作一样调用 `beginChange()` 重新读取三个文件，目录请求结束后同样更新 models.dev，但等它完成，再执行每系最新，最后全量注册一次，然后返回状态。
 5. 管理页和命令的修改都经过 `Endpoints` 的方法。每个方法先调用 `beginChange()` 重新读取配置、密钥和目录缓存三个文件，在最新内容上改动、保存，再调用 `registerAll()` 重新注册。
 
 ## 并发和过期数据
@@ -33,6 +34,7 @@
 - 可能同时运行多个 pi，各自持有一份内存里的配置。修改前重新读文件，避免用一份旧内容整份覆盖另一个 pi 刚写入的修改。别的 pi 已注册的服务商不会自动更新，要运行 `/reload`。
 - 配置或密钥文件损坏时，`beginChange()` 拒绝修改，免得用空配置覆盖用户待修的文件。
 - `refresh()` 的请求完成后，先用 `isCurrent()` 确认服务还在、地址没变，再写缓存和错误记录。否则请求期间删除、改名或改地址的服务会被写回过期的目录。
+- “每系最新”在目录请求之后修改配置，同样要防过期数据：`planFromFiles()` 在重新读取的文件快照上计算，并核对缓存里目录的来源地址（`Catalog.baseUrl`）和快照里的服务地址一致。没有变化时不写文件；配置或密钥文件损坏时不修改，内存状态不变，也不让刷新失败。目录缓存读取或解析失败时按没有缓存处理（缓存可以重建），显式刷新照常联网并重写缓存。pi 联网刷新时只保存快照里的配置，不把快照换进内存；管理页刷新是用户的显式操作，开始时就用 `beginChange()` 重新加载（配置或密钥文件读不了时拒绝并报错，内存不变），迁移时先保存成功，再把快照换进内存，最后全量注册，让所有服务的注册和内存一致。打开开关同样在快照上修改，保存成功后才换进内存。详见“每系最新”的[执行时机](#执行时机)。
 - `refresh()` 自带 15 秒超时，并和调用方的 signal 合并。命令里的 `ctx.signal` 在 agent 空闲时为空，不能依赖它。
 
 ## 注册方式
@@ -84,11 +86,12 @@ pi 的 Anthropic 实现按模型能力和请求内容生成 beta 列表（如 `m
 - `baseUrl` 是服务根地址。保存时去掉末尾的 `/` 和 `/v1`。
 - `overrides` 的字段见 `src/config.ts` 的 `ModelOverride`，保存前由 `validateOverride()` 校验。`thinkingLevels` 是 pi 的档位名列表，空数组表示不支持调节思考；列表里的 `off` 和 `none` 都表示可以关闭思考，转换时统一写成 `none`。也可以直接写 `thinkingLevelMap`，它优先于 `thinkingLevels`。
 - `disabled: true` 表示停用整个服务，不注册到 pi，其余字段照常保存。服务启用时不写这个字段。编辑服务设置时沿用原值，只有 `setServiceDisabled()` 修改它。
+- `latestPerFamily: true` 表示开启[每系最新](#每系最新)。没开启时不写这个字段。编辑服务设置时沿用原值，只有 `setLatestPerFamily()` 修改它。
 - 服务配置由 `serviceProblem()` 校验：服务名、`http(s)` 地址、`defaultApi` 属于 `SUPPORTED_APIS`、`apiKeyEnv` 是合法的环境变量名、请求头的值都是字符串。手工写坏的服务不注册，原因显示在状态里。
 
 `endpoints-auth.json` 的格式是 `{ "<服务名>": { "apiKey": "..." } }`。在 macOS 和 Linux 上写入时把权限设为 600。
 
-`endpoints-cache.json` 的格式是 `{ "<服务名>": Catalog }`，`Catalog` 见 `src/catalog.ts`。文件损坏时当作没有缓存。
+`endpoints-cache.json` 的格式是 `{ "<服务名>": Catalog }`，`Catalog` 见 `src/catalog.ts`，其中 `baseUrl` 是读取这份目录时用的服务根地址，旧版本写的缓存没有这一项。文件读取或解析失败时当作没有缓存。内容能解析、但结构不对（如 JSON `null`）时不在这个承诺内，是原有的缺口。
 
 `endpoints-modelsdev.json` 的格式见 [models.dev](#modelsdev) 一节。
 
@@ -151,8 +154,8 @@ compat 不从 models.dev 取。
 
 ### 何时下载
 
-- `Endpoints.needsModelsDev()` 判断是否需要：在没停用、有密钥的服务里，有模型（目录里的全部模型，加上已启用但目录里没有的）的上下文、最大输出、输入、思考或价格当前取自 models.dev 或默认值。不需要时不下载。
-- `Endpoints.updateModelsDev()` 在需要时调用 `updateModelsDev()`，拿到新数据后调用 `registerAll()`。同一个 `Endpoints` 并发调用时共用同一个任务，只重新注册一次。
+- `Endpoints.needsModelsDev()` 判断是否需要：在没停用、有密钥的服务里，有模型（目录里的全部模型，加上已启用但目录里没有的）的上下文、最大输出、输入、思考或价格当前取自 models.dev 或默认值，或者服务开启了[每系最新](#每系最新)（要靠 models.dev 判断模型类型）。不需要时不下载。
+- `Endpoints.updateModelsDev()` 在需要时调用 `updateModelsDev()`，拿到新数据后调用 `registerAll()`。同一个 `Endpoints` 并发调用时共用同一个任务（`modelsDevTask`），只重新注册一次。管理页的刷新和开关通过 `waitModelsDev()` 等这个任务（传 `register` 为假），拿到一个认领函数。它们最后总会全量注册，到真正进入注册阶段时才调用认领函数，只做标记；中途因为文件读不了等原因退出时不认领。任务自己是否注册取决于有没有后台调用方：同一个任务若有后台 `updateModelsDev()` 调用方（`register` 为真），任务拿到新数据后先全量注册（它的回调先于等待方执行），显式入口随后还会再注册一次；纯管理页并行刷新多个服务时任务不注册，每次刷新各全量注册一次，没有这次额外注册。
 - `updateModelsDev()` 先用 `loadModelsDev()` 重新读文件，因为可能同时运行着多个 pi，别的 pi 可能刚下载过；文件里的 `fetchedAt` 或 `etag` 变了就算数据变化。然后判断是否到期：本地没有数据，或上次成功检查超过 24 小时（`CHECK_INTERVAL_MS`）；失败后 30 分钟内（`RETRY_AFTER_MS`）不再试，失败时间只记在进程内。同一进程里同时只发一个请求，并发的调用共用结果。
 - 请求带 `If-None-Match`，超时 60 秒（`FETCH_TIMEOUT_MS`）。回 304 时只更新 `checkedAt`。失败原因记在进程内，成功后清空；重新读到的文件的 `checkedAt` 晚于本进程的失败时间时，说明别的 pi 在失败之后检查成功过，也清空失败原因和 30 分钟的退避。`modelsDevStatus()` 把失败原因和时间、`fetching` 一起交给管理页。`updateModelsDev()` 不抛出错误。
 - 调用时机见[数据流](#数据流)：pi 调用 `refreshModels` 时在后台进行；管理页刷新时等它完成。插件加载时只读文件，`pi -p` 这类非交互运行不会调用 `refreshModels`，所以只用本地文件。
@@ -252,6 +255,81 @@ compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目
 
 `baseUrlFor()` 按协议拼接地址：`anthropic-messages` 用根地址，`google-generative-ai` 用 `{root}/v1beta`，其余用 `{root}/v1`。
 
+## 每系最新
+
+服务开启 `latestPerFamily` 后，已启用模型所在的每个系列只保留目录里的最新版。服务端把 `gpt-6.1-sol` 换成 `gpt-6.2-sol` 后，用户不用手动换。
+
+### 识别系列
+
+`familyOf()` 把模型 id 拆成系列名、版本和日期：
+
+- 最后一个 `/` 之前的前缀留在系列名里，`codex/` 和 `claude/` 是不同的系列。系列名区分大小写。
+- 名字按 `-` 拆分。4 位及以上的纯数字段（`DATE_SEGMENT`，如 `20250929`、`0324`、`2024`）是日期，紧跟在日期段后面的 1 到 2 位数字段也算日期（`2024-08-06`），这种拆开写的日期由 `normalizeDate()` 归一成紧凑的 `20240806`，和 `20231201` 这种写法能直接比较。日期不进系列名，也不算版本。
+- 剩下的段里，第一串连续的版本段是版本：`6.2` 是 `["6", "2"]`，`5-5` 也是 `["5", "5"]`。版本段匹配 `VERSION_SEGMENT`：不超过 3 位的数字，或者含 `.` 的数字，可以以 `v` 开头。第一串之后再出现的数字段留在系列名里，如 `gemini-2.5-flash-preview-05-20` 的系列名是 `gemini-flash-preview-05-20`。
+- 其余的段用 `-` 连起来，加上前缀，就是系列名。系列名不记录版本段原来的位置，`gpt-6-sol` 和 `gpt-sol-7` 是同一系列。没有版本段、或者只有版本段的名字不属于任何系列。
+
+例如 `codex/gpt-6.2-sol` → `codex/gpt-sol` 6.2；`opencode-zen-free/mimo-v2.6-flash-free` → `opencode-zen-free/mimo-flash-free` 2.6；`claude-sonnet-4-5-20250929` → `claude-sonnet` 4.5，日期 20250929；`deepseek-v3-0324` 和 `deepseek-v3-1120` → `deepseek` 3，日期分别是 0324 和 1120；`Index-Translate-35B-A3B` 不属于任何系列。
+
+`compareMembers()` 按段比较版本，缺的段按 0 算；版本相同且两边都有日期时再按段比较日期。只有一边有日期时算作相同：不带日期的名字通常是指向最新版的别名。数字以十进制字符串保存和比较（去掉开头的 0 后先比长度，再逐位比），很长的数字不会溢出。
+
+### 规则
+
+`pickLatest(enabled, candidates, catalog)` 是纯函数。`catalog` 是目录里的全部 id；`candidates` 是其中可以被选为新版的模型，由 `planLatest()` 去掉隐藏模型（`ResolvedModel.hidden`）和 models.dev 标为非对话的模型（`isChatModel()`）。对至少有一个已启用成员的每个系列：
+
+1. 候选里没有这个系列的成员时不动。
+2. 取候选里版本最高的成员；其中带日期的只留日期最新的，不带日期的都留下。这些是最新版。
+3. 被取代的已启用成员：比最新版旧的，以及和最新版同版本、但已经不在 `catalog` 里的（如别名 `claude-sonnet-4-5` 消失，只剩 `claude-sonnet-4-5-20250929`）。没有被取代的成员时不动，所以目录里还在的同版本多个 id 都保留。
+4. 已启用的成员里有最新版时，被取代的成员都换成它；否则，已启用的成员里还有既不是最新版、又不被取代的（比最新版还新，或者同版本但在目录里被隐藏）时整个系列不动，免得降级；都被取代时启用最新版里的一个：有带日期的选它（第 2 步只留了日期最新的），否则选不带日期的，几个都不带日期时选在目录中排在前面的。
+5. 新版放在第一个被停用的旧版原来的位置。
+
+不属于任何系列的已启用模型不动。返回的 `replacements` 列出每个被停用的旧版和替换它的新版，为空表示没有变化。旧 id 的 `overrides` 留在配置里，不复制给新 id。
+
+`planLatest(service, catalog)` 在调用 `pickLatest()` 前检查两项，不满足时跳过：
+
+- 目录缓存的来源地址：`fetchCatalog()` 把请求用的根地址记在 `Catalog.baseUrl`。旧版本写的缓存没有这一项，按来源未知处理；和服务的地址不同时，缓存可能是另一个 pi 在服务改地址前写下的旧目录。
+- models.dev 数据：`hasModelsDevData()` 为假（本进程既没读到有效的本地文件，也没下载成功过）时推迟，否则分不出候选是不是对话模型。开启开关的服务让 `needsModelsDev()` 为真，所以插件会按原有的退避（失败后 30 分钟）去下载。有数据、但 models.dev 里查不到的模型按对话模型处理，和注册一致。数据旧了不推迟，见[已知限制](#已知限制)。
+
+### 执行时机
+
+`planFromFiles()` 用 `readFiles()` 读三个文件的快照，在快照上调用 `planLatest()`，有变化时返回改过启用列表的快照。没有变化时不写文件，也不替换内存里的状态，pi 的联网刷新不会变成一次隐式的重新加载。配置或密钥文件读不了时只记下 `loadError`，内存里的配置、密钥和缓存保持原样。
+
+两个显式入口立即生效，开关和换过的启用列表都只保存一次，最后全量注册一次：
+
+- `setLatestPerFamily(name, on)`：先用 `readSnapshot()` 校验磁盘快照（读不了或没有这个服务时报错）。打开时等 models.dev 更新完（`waitModelsDev(true)`，最多 60 秒；开关还没保存，所以不检查 `needsModelsDev()`）。然后重新读一次最新快照，在快照上写开关、调用 `planLatest()`；`saveConfig()` 成功后才用 `commit()` 把快照换进内存，认领 models.dev 的注册，调用一次 `registerAll()`。保存失败时内存不变，也不注册。
+- `refreshForPage()`：管理页的 `refresh`（包括打开页面时的后台刷新）和新建服务的首次刷新。先 `beginChange()` 重新读取配置、密钥和缓存，配置或密钥文件读不了时抛错，内存不变，不请求目录；pi 联网刷新已经写进磁盘的迁移因此在这里显示出来并在本进程生效。然后刷新目录，等 models.dev 更新完，目录刷新成功时调用 `migrateAndCommit()`：先 `saveConfig()`，成功后才用 `commit()` 把快照换进内存。只要载入了快照，不管目录刷新成功与否、有没有迁移，最后都认领 models.dev 的注册并调用一次 `registerAll()`（放在 `finally` 里）。`beginChange()` 换进内存的可能还有别的 pi 改过的其他服务（地址、密钥、请求头），它们的 `refreshModels` 会按内存里的新配置发布模型，只注册目标服务的话，pi 里这些服务还是旧注册，旧密钥会配上新地址，新模型也查不到请求头。
+
+pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功后调用 `migrateOnDisk()`，**只改磁盘**：保存快照里的配置，替换 pi 设置里的旧模型，再提示用户；不改本进程的内存状态，`refreshModels` 照常按内存里的配置返回模型列表，也不重新注册。原因：
+
+- pi 1.3 重新注册服务商时会取消这个服务商正在进行的刷新，并让所有服务商做一次 `allowNetwork: false` 的刷新，同一批里还没返回的服务就跳过了这轮联网刷新。
+- pi 1.3 发布 `refreshModels` 的结果时会清空 `Model.headers`，请求时按初次注册的模型查请求头，在这里返回新模型会丢掉它的请求头。
+- 把整份快照换进内存，会连带换入别的 pi 写入的密钥和地址。
+
+新配置在新会话（pi 设置已改）、新子代理、`/reload` 或下次启动时生效；本进程之后任何经过 `beginChange()` 的修改也会读到它。保存失败时放弃，不影响刷新。models.dev 这时通常还在后台更新，本进程没有数据时推迟到下次刷新。
+
+换了模型之后，`afterMigration()` 用 `replaceModels()` 替换 pi 设置里的旧模型，再调用 `Endpoints.notify` 提示。只改磁盘时提示“<服务名>：旧 id → 新 id 已写入配置，新会话生效，当前 pi 用 /reload”；显式入口提示“<服务名>：旧 id → 新 id。当前会话请用 /model 切换”，旧 id 从注册里去掉后，正在用它的会话不会自动切换。`notify` 由 `src/index.ts` 设置：它在 `session_start` 时记下 `ctx`，`session_shutdown` 时清掉，有界面（`ctx.hasUI`）时调用 `ctx.ui.notify()`。
+
+### pi 设置
+
+`replaceModels(provider, replacements)` 用 [pi 默认模型](#pi-默认模型)一节的 `SettingsManager` 方式读写全局设置：
+
+- `defaultProvider` 等于这个服务、`defaultModel` 是被停用的旧 id 时，改成新 id。
+- `enabledModels` 是数组时，精确等于 `<服务名>/<旧 id>` 的项换成 `<服务名>/<新 id>`；新的已经在列表里时只删掉旧的。通配符和大小写不同的项不改，不是数组时不动。
+- 没有变化时不写文件。`settings.json` 读不了或写不了时，`afterMigration()` 跳过这一步，启用列表的修改已经保存。
+- `SettingsManager` 打开时读一次文件、保存时写回改过的字段。两次修改同时进行时，后保存的会用自己读到的旧 `enabledModels` 覆盖前一次的修改，所以 `replaceModels()`、`writeDefaultModel()` 和 `clearDefaultModel()` 在 `serialized()` 的进程内队列里一个接一个执行。同一批刷新里两个服务同时迁移，两个旧项都会换掉。
+
+### 已知限制
+
+- 多个 pi 同时修改配置或 pi 设置时，读、改、写之间没有跨进程锁，后写的可能覆盖先写的。所有修改路径都是这样。
+- 后台的 models.dev 更新拿到新数据后调用 `registerAll()`，同样可能取消 pi 正在进行的其他服务商的刷新。
+- 本地的 models.dev 数据旧了、下载又一直失败时不推迟，新出现的模型可能还没有分类，按对话模型处理，可能被选为新版。
+- pi 联网刷新不等 models.dev，后台更新还在进行时，迁移按本地已有的旧数据判断模型类型。
+- 管理页刷新开始时已经把新快照换进内存，而 pi 里还是旧注册，要等刷新结束（包括等 models.dev，最多 60 秒）才全量注册。这期间如果 `/model` 触发了联网刷新，`refreshModels` 会在旧注册下发布按新配置算出的模型；刷新结束的全量注册后恢复一致。
+- 原有问题，不是本功能引入的：当前会话正在用的模型被移出注册（停用，或被“每系最新”替换）后，pi 1.3 重新注册时会保留会话里的旧模型对象（含旧地址），而密钥按服务名取最新的注册。如果服务的地址和密钥同时被改过（通常是另一个 pi 改的），之后任何一次全量注册（管理页的任意修改操作、管理页刷新）后，这个会话的下一条请求可能把新密钥发到旧地址。main 上所有经过 `beginChange()` + `registerAll()` 的管理操作都是这样。规避办法：改了服务地址或密钥后，各个 pi 用 `/reload`，或在 `/model` 里重新选模型。
+
+### 注册出错
+
+`register()` 和 `unregister()` 调用 pi 时经过 `sync()`：出错时把原因记在 `syncErrors`，不抛出，下次注册成功时清掉。`registered` 和 beta 记录只在注册或注销成功后更新；注销出错时保留记录，下次 `registerAll()` 会再试。配置已经保存，显式入口照常返回已保存的状态，pi 设置的替换和提示照常执行；后台 models.dev 更新后的 `registerAll()` 也不会产生未处理的 Promise 拒绝。状态里的 `syncError` 带上原因，管理页提示用户 `/reload`。
+
 ## 注册时的约束
 
 - 服务名必须匹配 `^[a-z0-9][a-z0-9._-]*$`，且不能和 pi 自带的服务商同名。用 `registerProvider` 注册同名服务商并提供 `models` 时，会替换掉它全部的自带模型。
@@ -269,7 +347,7 @@ compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目
 - `settings.json` 读不了时，`SettingsManager` 不写文件，只把错误记下来，`open()` 先检查加载错误并拒绝写入。
 - 用 `projectTrusted: false` 打开，不读当前目录的 `.pi/settings.json`。写入只写全局设置，读取也只读全局设置，页面上的星标才和刚写入的值一致；项目设置的 `enabledModels` 也不会被合并进全局列表。项目设置里的 `defaultModel` 在那个目录里仍然优先，页面不显示它。
 
-只有已启用、并且服务已注册到 pi 的模型才能设为默认，否则 pi 启动时找不到它，会改用别的模型。取消默认时调用 `setDefaultModelAndProvider(undefined, undefined)`，写入时这两个字段从 JSON 里去掉，`enabledModels` 不动。pi 没有默认模型时，新会话用 Ctrl+P 列表的第一个，没有列表时用 pi 自带的各服务默认模型或第一个可用模型。运行中的 pi 在内存里保留旧的设置，运行 `/reload` 后才读到新的默认模型。
+只有已启用、并且服务已注册到 pi 的模型才能设为默认，否则 pi 启动时找不到它，会改用别的模型。取消默认时，页面带上它认为的当前默认模型；`clearDefaultModel()` 在设置队列里先核对，当前默认模型已经不是它（例如被“每系最新”或别的 pi 换掉了）时不写文件，接口返回最新状态并带 `defaultChanged: true`，页面提示没有取消。一致时调用 `setDefaultModelAndProvider(undefined, undefined)`，写入时这两个字段从 JSON 里去掉，`enabledModels` 不动。pi 没有默认模型时，新会话用 Ctrl+P 列表的第一个，没有列表时用 pi 自带的各服务默认模型或第一个可用模型。运行中的 pi 在内存里保留旧的设置，运行 `/reload` 后才读到新的默认模型。
 
 ## 管理页
 
@@ -285,19 +363,22 @@ compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目
 
 - `GET /api/state` 返回全部状态，包括 `loadError`、插件版本 `version` 和 models.dev 的状态 `modelsDev: { fetchedAt?, checkedAt?, error?, fetching }`（见 `modelsDevStatus()`）。每个模型在 `ResolvedModel` 的字段（含 `compatSources`、`modelsDev`、`modelType`）之外，还有 `enabled`、`levels` 和原样的手动设置 `override`，手动 compat 里值为 `null` 的字段也在其中。
 - `GET /api/update` 在 npm 上有新版本时返回 `{ latestVersion, releaseUrl }`，否则返回 `{}`。
-- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setServiceDisabled`、`setEnabled`、`setOverride`、`setDefaultModel`、`clearDefaultModel`，成功时返回最新状态，失败时返回 400 和 `{ error }`。
+- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setServiceDisabled`、`setLatestPerFamily`、`setEnabled`、`setOverride`、`setDefaultModel`、`clearDefaultModel`，成功时返回最新状态，失败时返回 400 和 `{ error }`。状态里每个服务带 `latestPerFamily` 布尔值。
+- `setLatestPerFamily` 的请求体是 `{ name, latestPerFamily }`。打开时先按缓存的目录执行一次[每系最新](#每系最新)，再返回状态。
+- `clearDefaultModel` 的请求体是 `{ name, id }`，即页面显示的默认模型；和当前的不一致时不清除，返回 200、最新状态和 `defaultChanged: true`。
+- 每个服务的 `status` 里可能有 `syncError`：配置已保存，但向运行中的 pi 注册或注销时出错，页面在服务顶部显示原因并提示 `/reload`。
 - `setEnabled` 启用 models.dev 标为非 `chat` 类型的模型时返回 400，错误信息说明模型类型，如"jev-latest 是分类模型，pi 不能拿它对话"；停用不受限制。`setDefaultModel` 对这类模型同样返回 400。
-- `refresh` 刷新服务目录，需要时再更新 models.dev，等它完成（最多 60 秒）后返回 200 和最新状态。目录刷新失败时状态里多一个 `refreshError`；models.dev 失败不算刷新失败，原因只在 `modelsDev.error` 里。
+- `refresh` 先重新读取配置、密钥和缓存（配置或密钥文件读不了时返回 400；缓存读取或解析失败时按没有缓存处理），再刷新服务目录，需要时再更新 models.dev，等它完成（最多 60 秒）后返回 200 和最新状态。目录刷新失败时状态里多一个 `refreshError`；models.dev 失败不算刷新失败，原因只在 `modelsDev.error` 里。
 - `testModel` 的请求体可以带 `thinkingLevel`：pi 的档位名，必须是这个模型 `levels` 里 `off` 以外的一项，否则返回 400。返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`，`request` 含 `api`、`baseUrl`、`id`，带了档位时还有 `thinkingLevel`。
 - `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。可以带 `apiKey`，和服务一起保存。新建服务时只要拿得到密钥（`apiKey` 或密钥环境变量），就接着按 `refresh` 的方式刷新目录和 models.dev；刷新失败时服务已经保存，和 `refresh` 一样返回 200 和带 `refreshError` 的状态。
 
-页面的状态变化后，`render()` 重建整个内容区，包括操作失败时显示错误。服务表单因此把还没保存的内容记在 `serviceDraft` 里，按服务名区分，重建时优先用它；保存成功、切换服务或点"添加服务"时清掉。密钥卡片的输入框同样把没保存的密钥记在 `keyDraft` 里，清掉的时机相同。新增其他会被 `render()` 重建的表单时，也要这样保存输入。打开页面后，以及在左栏重新启用服务后，`refreshInBackground()` 在后台调用 `refresh`，失败原因只显示在服务状态里，不弹顶部提示。这是唯一不由用户操作触发的重画，所以由 `flush()` 把它推迟到没有文字输入框获得焦点（`typing()` 为假）、也没有按着鼠标的时候，免得输入框失去焦点，或者点击落在被替换掉的元素上。`refreshing` 记下正在刷新的服务，这些服务的"刷新目录"按钮显示"刷新中…"并且不能点，手动刷新也用它。密钥框只出现在添加服务的表单里，已有服务的密钥在单独的密钥卡片里修改。密钥框用 `type="password"` 加 `autocomplete="one-time-code"`，免得 Chrome 把网站的已存密码填进来：密码框会忽略 `off`，`new-password` 会弹出生成密码。添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随。
+页面的状态变化后，`render()` 重建整个内容区，包括操作失败时显示错误。服务表单因此把还没保存的内容记在 `serviceDraft` 里，按服务名区分，重建时优先用它；保存成功、切换服务或点"添加服务"时清掉。密钥卡片的输入框同样把没保存的密钥记在 `keyDraft` 里，清掉的时机相同。新增其他会被 `render()` 重建的表单时，也要这样保存输入。打开页面后，以及在左栏重新启用服务后，`refreshInBackground()` 在后台调用 `refresh`，失败原因只显示在服务状态里，不弹顶部提示。这是唯一不由用户操作触发的重画，所以由 `flush()` 把它推迟到没有文字输入框获得焦点（`typing()` 为假）、也没有按着鼠标的时候，免得输入框失去焦点，或者点击落在被替换掉的元素上。`refreshing` 记下正在刷新的服务，这些服务的"刷新目录"按钮显示"刷新中…"并且不能点，手动刷新也用它。密钥框只出现在添加服务的表单里，已有服务的密钥在单独的密钥卡片里修改。"每个系列只保留最新版"的开关在 `renderLatest()` 生成的单独卡片里，点了立即调用 `setLatestPerFamily`，不属于服务表单，没有需要在重建时保留的输入；请求失败时把开关恢复原状。密钥框用 `type="password"` 加 `autocomplete="one-time-code"`，免得 Chrome 把网站的已存密码填进来：密码框会忽略 `off`，`new-password` 会弹出生成密码。添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随。
 
-模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写），分组和前缀按钮按 `byPrefix()` 排序：`PREFIX_ORDER` 里的前缀按列表顺序排在前面，其余按字母序；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。左栏的服务也这样处理：`parked` 记下页面打开时每个服务是否停用，`serviceGroups()` 按这份记录把服务分成启用和停用两组，组内保持配置文件里的顺序；打开页面后新加的服务按加入时的状态归组。
+模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写），分组和前缀按钮按 `byPrefix()` 排序：`PREFIX_ORDER` 里的前缀按列表顺序排在前面，其余按字母序；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。页面拿到新状态时一律经过 `setState()`，它把新状态里新启用的模型补进 `pinned`，所以“每系最新”自动启用的新版本也会出现在"已启用"页，被换掉的旧版本照常留着。左栏的服务也这样处理：`parked` 记下页面打开时每个服务是否停用，`serviceGroups()` 按这份记录把服务分成启用和停用两组，组内保持配置文件里的顺序；打开页面后新加的服务按加入时的状态归组。
 
 列表的 `kept` 出于同样的原因，记下当前服务里刚用开关启用或停用、或在详情里保存或清除了手动设置的模型，`matches()` 不按"显示隐藏模型"和协议筛选排除这些模型；改了筛选条件（搜索、协议、`owned_by`、"显示隐藏模型"和前缀按钮）、切换服务或刷新页面时清空。`renderChips()` 在当前选中的前缀数量为 0 时补上这个按钮，筛选条件始终看得到。
 
-详情面板不随 `render()` 重建，免得冲掉没保存的输入；`renderDrawer()` 只在打开面板、保存或清除手动设置后重建，开关的状态和星标由各自的代码单独更新。
+详情面板不随 `render()` 重建，免得冲掉没保存的输入；`renderDrawer()` 只在打开面板、保存或清除手动设置后重建。每次拿到新状态后，`refreshDrawerHead()` 按最新状态更新面板里的星标和启用开关（`#drawer-toggle`），后台刷新或“每系最新”换掉模型时开关也会跟着变；面板里的模型被停用、又已经不在目录里时，它不再出现在状态里，开关按未启用显示，星标清空：旧的星标可能还显示着被换掉的默认模型，点了会清掉刚换上的新默认模型。面板的其余内容不重建，未保存的输入保留。
 
 - 关闭前的确认：`overrideForm()` 建好表单后记下各输入框的值，`drawerDirty()` 和当前的值比较，测试消息的档位不算在内。Esc、遮罩和 × 都调用 `closeDrawer()`，有修改时先用 `confirm()` 确认。`typing()` 为真，或者 `event.isComposing` 为真、`keyCode` 为 229（输入法正在选字）时，Esc 不处理。
 - 错误的位置：面板分为可滚动的 `.drawer-body`、提示区 `#drawer-msg` 和底部按钮。表单的校验错误、`run()` 失败的原因和测试结果都由 `drawerMessage()` 放进提示区，它在底部按钮上方，不随面板内容滚动。`run()` 成功时只清掉提示区里的错误，测试结果保留。
@@ -327,7 +408,9 @@ compat 只从原厂在 pi 自带目录里的同名条目抄，不从服务端目
 - `modelsdev.test.ts`：models.dev 的字段映射、裁剪、服务商名单和匹配顺序；下载时机，包括 24 小时检查间隔、失败后 30 分钟、304、超时、同时只发一个请求、重新读取别的 pi 写入的文件和损坏的文件。用 `vi.stubGlobal("fetch")` 模拟 models.dev，用 `Date.now` 的替身控制时间。
 - `resolve.test.ts`：参数分层（含 models.dev 层）、思考档位、协议选择、compat 的逐字段合并和 `null`、价格和 Anthropic beta 规则，用 `setBuiltinCatalogForTest()` 换掉 pi 自带目录，用 `setModelsDevForTest()` 换掉 models.dev 数据。整份写在配置里的手动 compat 合并后结果不变，也有测试覆盖。
 - `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验（含 compat 字段值为 `null`）、models.dev 的启动读取、是否需要下载、`refreshModels` 后台下载后重新注册且不循环、非对话模型不注册也不能启用、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple`、由模拟 `fetch` 捕获的请求中，Anthropic 会话亲和头遵守默认值、手动开关和会话 ID 条件，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
-- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作，刷新时等待 models.dev 及其失败不算刷新失败，测试消息的思考档位校验和发送，写入 pi 默认模型时保留其他设置、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
+- `family.test.ts`：系列和版本的识别（前缀、`v` 开头、4 位及以上的日期段、拆开写的日期归一、无系列的名字、大小写、版本段的位置）、版本比较（含很长的数字），以及 `pickLatest()` 的规则：目录里没有的旧 id、系列在目录里没有成员、不降级、没有变化、别名消失时由同版本的 id 接替、目录里还在的同版本 id 都保留、带日期和不带日期的候选共存时选哪个（包括旧 id 从目录消失的情况）、拆开写的日期不会让新版被当成旧版。
+- `latest.test.ts`：“每系最新”的开关和执行时机。用一个模仿 pi 1.3 模型运行时的替身（重新注册会取消进行中的刷新，并让所有服务商做一次离线刷新）检查 `refreshModels` 里的迁移只改磁盘（配置和 pi 设置已改、内存和返回给 pi 的列表不变、不注册、发了提示）、同一批里快的服务迁移不影响慢的服务、两个服务同时迁移时 `enabledModels` 里两个旧项都换掉；还包括打开开关和管理页刷新只全量注册一次、管理页并行刷新时共享的 models.dev 下载不另外触发全量注册、管理页刷新（目录失败时也一样）后其他服务的地址、密钥和请求头按新配置注册、打开开关时保存失败内存不变、开关中途失败时后台 models.dev 更新照常注册、注册出错时记下原因并照常返回、注销出错时保留记录并在下次重试、刷新失败不执行、没有变化时不写文件、pi 联网刷新不替换内存状态、联网刷新写盘后管理页刷新读到新启用列表并只注册一次、管理页刷新时文件读不了就拒绝、隐藏和非对话模型不算新版、从没拿到过 models.dev 数据时推迟（包括只因开关才需要 models.dev 的服务）、缓存没有来源地址或来源地址不符时跳过、配置或密钥文件损坏时内存状态不变；以及 pi 默认模型和 `enabledModels` 的替换、`settings.json` 损坏时跳过。
+- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作（含“每系最新”的开关和刷新后的替换），刷新时等待 models.dev 及其失败不算刷新失败，测试消息的思考档位校验和发送，写入 pi 默认模型时保留其他设置、取消默认时核对页面带的默认模型、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
 
 `test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。models.dev 的数据和下载状态（失败时间、错误原因）是模块级的，同一个测试文件里的用例共用，所以会用到它的测试文件在 `beforeEach` 里调用 `setModelsDevForTest(undefined)` 清空。
 
