@@ -189,6 +189,29 @@ describe("Endpoints", () => {
 		const { pi } = fakePi();
 		expect(() => new Endpoints(pi)).not.toThrow();
 	});
+
+	it("缓存文件被截断时，服务名是 constructor 也不会读到继承的属性", () => {
+		writeFileSync(
+			join(temp.dir, "endpoints.json"),
+			JSON.stringify({ services: [{ name: "constructor", baseUrl: "https://c.test", enabled: ["model-x"], overrides: {} }] }),
+		);
+		writeFileSync(join(temp.dir, "endpoints-cache.json"), '{"constructor": {"fetchedAt": 1, "mod');
+		const endpoints = new Endpoints(fakePi().pi);
+		expect(endpoints.status()[0]).toMatchObject({ name: "constructor", catalogSize: undefined, missing: [] });
+		expect(endpoints.updates("constructor")).toEqual([]);
+	});
+
+	it("模型 id 是 constructor 时不会把继承的属性当成手动设置", () => {
+		writeFileSync(
+			join(temp.dir, "endpoints.json"),
+			JSON.stringify({ services: [{ name: "cpa", baseUrl: "https://cpa.test", enabled: ["constructor"], overrides: {} }] }),
+		);
+		const endpoints = new Endpoints(fakePi().pi);
+		expect(endpoints.models("cpa").find((model) => model.id === "constructor")?.name.value).toBe("constructor");
+		// 编辑服务时传入的 overrides 同样整理成没有原型的对象。
+		endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", overrides: {} } as never, "cpa");
+		expect(endpoints.models("cpa").find((model) => model.id === "constructor")?.name.value).toBe("constructor");
+	});
 });
 
 describe("Endpoints 的校验和并发", () => {

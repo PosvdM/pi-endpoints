@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
@@ -72,6 +73,44 @@ describe("管理页的防护", () => {
 	it("Host 不是 127.0.0.1:端口 时拒绝，防止 DNS 重绑定", async () => {
 		expect(await rawGet(`/?token=${token}`, `evil.test:${base.port}`)).toBe(403);
 		expect(await rawGet(`/?token=${token}`, `127.0.0.1:${base.port}`)).toBe(200);
+	});
+
+	it("CSP 只放行本机的脚本和样式，内联脚本只放行 import map", async () => {
+		const page = await realFetch(web.url);
+		const html = await page.text();
+		const importMap = /<script type="importmap">([\s\S]*?)<\/script>/.exec(html)?.[1] ?? "";
+		expect(JSON.parse(importMap).imports).toEqual({ preact: "/vendor/preact.js", "preact/hooks": "/vendor/hooks.js", htm: "/vendor/htm.js" });
+		const policy = page.headers.get("content-security-policy") ?? "";
+		const hash = createHash("sha256").update(importMap).digest("base64");
+		expect(policy).toContain(`script-src 'self' 'sha256-${hash}';`);
+		expect(policy).toContain("style-src 'self';");
+		expect(policy).not.toContain("unsafe-inline");
+	});
+
+	it("页面的脚本、样式和第三方模块不要求 token，但要检查 Host", async () => {
+		for (const path of ["/app/main.js", "/app/style.css", "/vendor/preact.js", "/vendor/hooks.js", "/vendor/htm.js"]) {
+			const response = await realFetch(new URL(path, base.origin));
+			expect(response.status, path).toBe(200);
+			expect(response.headers.get("content-type")).toBe(path.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
+		}
+		// 浏览器按 ES 模块导入，htm 不能是 UMD 文件。
+		const htm = await (await realFetch(new URL("/vendor/htm.js", base.origin))).text();
+		expect(htm).toMatch(/export\s*\{|export default/);
+		expect(await rawGet("/app/main.js", `evil.test:${base.port}`)).toBe(403);
+		for (const path of ["/app/../server.ts", "/app/%2e%2e%2fserver.ts", "/app/web.ts", "/app/x/y.js", "/vendor/vitest.js", "/page.html"]) {
+			expect(await rawGet(path, `127.0.0.1:${base.port}`), path).toBe(404);
+		}
+	});
+
+	it("响应带递增的编号，操作带回的状态在发出前重新生成", async () => {
+		const first = await call("/api/state");
+		const second = await call("/api/saveService", { service: { name: "cpa", baseUrl: "https://cpa.test" } });
+		expect(Number(second.headers.get("x-endpoints-seq"))).toBeGreaterThan(Number(first.headers.get("x-endpoints-seq")));
+		vi.stubGlobal("fetch", async () => new Response('{"error":"Invalid token"}', { status: 401 }));
+		await call("/api/setKey", { name: "cpa", apiKey: "sk-1" });
+		const refreshed = await (await call("/api/refresh", { name: "cpa" })).json();
+		expect(refreshed.refreshError).toContain("Invalid token");
+		expect(refreshed.services[0]).toMatchObject({ name: "cpa", status: { keySource: "file" } });
 	});
 
 	it("修改操作只接受 JSON", async () => {
@@ -186,6 +225,81 @@ describe("管理页的操作", () => {
 
 		state = await (await call("/api/setLatestPerFamily", { name: "relay", latestPerFamily: false })).json();
 		expect(state.services[0].latestPerFamily).toBe(false);
+	});
+
+	it("刷新带 latestPerFamily:false 时只刷新目录、不替换，即使磁盘上开关开着；不传时照旧替换", async () => {
+		let ids = ["gpt-6-sol", "gpt-6.1-sol"];
+		const modelsDev = { moonshotai: { id: "moonshotai", models: { "kimi-k9": { limit: { context: 1000, output: 100 } } } } };
+		vi.stubGlobal("fetch", async (url: string) =>
+			new Response(
+				JSON.stringify(
+					url === MODELS_DEV_URL ? modelsDev : url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) },
+				),
+			),
+		);
+		const enabledIds = (state: { services: { models: { id: string; enabled: boolean }[] }[] }) =>
+			state.services[0].models.filter((model) => model.enabled).map((model) => model.id);
+		await call("/api/saveService", { apiKey: "sk-1", service: { name: "relay", baseUrl: "https://relay.test" } });
+		await call("/api/setEnabled", { name: "relay", id: "gpt-6.1-sol", enabled: true });
+		await call("/api/setLatestPerFamily", { name: "relay", latestPerFamily: true });
+
+		ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		let state = await (await call("/api/refresh", { name: "relay", latestPerFamily: false })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		expect(state.services[0].models.map((model: { id: string }) => model.id)).toContain("gpt-6.2-sol");
+		expect(enabledIds(state)).toEqual(["gpt-6.1-sol"]);
+		expect(JSON.parse(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).services[0].enabled).toEqual(["gpt-6.1-sol"]);
+
+		const bad = await call("/api/refresh", { name: "relay", latestPerFamily: "no" });
+		expect(bad.status).toBe(400);
+
+		state = await (await call("/api/refresh", { name: "relay", latestPerFamily: true })).json();
+		expect(enabledIds(state)).toEqual(["gpt-6.2-sol"]);
+		ids = ["gpt-6.2-sol", "gpt-6.3-sol"];
+		state = await (await call("/api/refresh", { name: "relay" })).json();
+		expect(enabledIds(state)).toEqual(["gpt-6.3-sol"]);
+	});
+
+	it("状态里带待处理的新版，applyLatestOnce 只替换一次、不改开关", async () => {
+		const modelsDev = { moonshotai: { id: "moonshotai", models: { "kimi-k9": { limit: { context: 1000, output: 100 } } } } };
+		const ids = ["gpt-6-sol", "gpt-6.1-sol"];
+		vi.stubGlobal("fetch", async (url: string) =>
+			new Response(
+				JSON.stringify(
+					url === MODELS_DEV_URL ? modelsDev : url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) },
+				),
+			),
+		);
+		await call("/api/saveService", { apiKey: "sk-1", service: { name: "relay", baseUrl: "https://relay.test" } });
+		let state = await (await call("/api/setEnabled", { name: "relay", id: "gpt-6-sol", enabled: true })).json();
+		// 还没有 models.dev 数据，判断不了候选是不是对话模型。目录里有候选新版，所以刷新时会下载。
+		expect(state.services[0].updates).toEqual([]);
+		state = await (await call("/api/refresh", { name: "relay" })).json();
+		expect(state.services[0]).toMatchObject({ latestPerFamily: false, updates: [{ from: "gpt-6-sol", to: "gpt-6.1-sol" }] });
+
+		state = await (await call("/api/applyLatestOnce", { name: "relay" })).json();
+		expect(state.replaced).toEqual([{ from: "gpt-6-sol", to: "gpt-6.1-sol" }]);
+		expect(state.services[0]).toMatchObject({ latestPerFamily: false, updates: [] });
+		expect(state.services[0].models.filter((model: { enabled: boolean }) => model.enabled).map((model: { id: string }) => model.id)).toEqual(["gpt-6.1-sol"]);
+
+		state = await (await call("/api/applyLatestOnce", { name: "relay" })).json();
+		expect(state.replaced).toEqual([]);
+		const missing = await call("/api/applyLatestOnce", { name: "nope" });
+		expect(missing.status).toBe(400);
+		expect((await missing.json()).error).toContain("nope");
+	});
+
+	it("新建服务时保存 latestPerFamily，不传时关闭；编辑已有服务时忽略这个字段", async () => {
+		let state = await (await call("/api/saveService", { service: { name: "a", baseUrl: "https://a.test", latestPerFamily: true } })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		state = await (await call("/api/saveService", { service: { name: "b", baseUrl: "https://b.test" } })).json();
+		expect(state.services[1].latestPerFamily).toBe(false);
+
+		state = await (await call("/api/saveService", { previousName: "a", service: { name: "a", baseUrl: "https://a.test", latestPerFamily: false } })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		state = await (await call("/api/saveService", { previousName: "b", service: { name: "b", baseUrl: "https://b.test", latestPerFamily: true } })).json();
+		expect(state.services[1].latestPerFamily).toBe(false);
+		expect(JSON.parse(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).services.map((service: { latestPerFamily?: boolean }) => service.latestPerFamily)).toEqual([true, undefined]);
 	});
 
 	it("刷新失败时返回服务端原文", async () => {

@@ -184,3 +184,27 @@ export function pickLatest(enabled: readonly string[], candidates: readonly stri
 	}
 	return { enabled: next, replacements: [...remove].map(([from, to]) => ({ from, to })) };
 }
+
+/**
+ * 保守判断 `pickLatest()` 有没有可能算出替换，用来决定要不要下载 models.dev 去排除非对话模型。
+ * `candidates` 可以多于 `pickLatest()` 的候选（不排除非对话模型），这里只要有一个已启用成员可能被取代就返回真：
+ * 候选里有同系、比它新的成员，或者有同系、和它同版本的成员而它已经不在目录里。这正是 `pickLatest()` 判断
+ * “被取代”的两个条件，候选变少时最新版只会变旧，所以不会漏掉。
+ * 不考虑“整个系列不动、免得降级”：排除非对话模型后最新版可能变，这条规则的结论也会跟着变。
+ */
+export function mayReplace(enabled: readonly string[], candidates: readonly string[], catalog: readonly string[]): boolean {
+	const candidateFamilies = groupByFamily(candidates);
+	const inCatalog = new Set(catalog);
+	for (const [family, current] of groupByFamily(enabled)) {
+		const members = candidateFamilies.get(family);
+		if (!members) continue;
+		for (const entry of current) {
+			const supersedes = (member: Entry) => {
+				const order = compareMembers(member.member, entry.member);
+				return order > 0 || (order === 0 && !inCatalog.has(entry.id));
+			};
+			if (members.some(supersedes)) return true;
+		}
+	}
+	return false;
+}

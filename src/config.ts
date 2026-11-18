@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { Api, ModelCost, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Catalog } from "./catalog.ts";
+import type { Replacement } from "./family.ts";
 import type { ModelsDevFile } from "./modelsdev.ts";
 
 /** 单个模型的手动设置。没写的项按服务端目录、pi 自带目录、models.dev、默认值的顺序取。 */
@@ -68,6 +69,10 @@ export function modelsDevPath(): string {
 	return join(getAgentDir(), "endpoints-modelsdev.json");
 }
 
+export function statePath(): string {
+	return join(getAgentDir(), "endpoints-state.json");
+}
+
 function readJson<T>(path: string, fallback: T): T {
 	if (!existsSync(path)) return fallback;
 	try {
@@ -97,7 +102,8 @@ export function normalizeService(service: Partial<ServiceConfig>): ServiceConfig
 		disabled: service.disabled === true ? true : undefined,
 		latestPerFamily: service.latestPerFamily === true ? true : undefined,
 		enabled: Array.isArray(service.enabled) ? service.enabled.filter((id) => typeof id === "string") : [],
-		overrides: service.overrides && typeof service.overrides === "object" ? service.overrides : {},
+		// 按模型 id 取值，id 来自服务端目录，同样不能读到继承的属性。
+		overrides: dict(service.overrides && typeof service.overrides === "object" ? service.overrides : {}),
 	};
 }
 
@@ -117,7 +123,7 @@ export function saveConfig(config: EndpointsConfig): void {
 }
 
 export function loadAuth(): AuthFile {
-	return readJson<AuthFile>(authPath(), {});
+	return dict(readJson<AuthFile>(authPath(), {}));
 }
 
 export function saveAuth(auth: AuthFile): void {
@@ -126,10 +132,10 @@ export function saveAuth(auth: AuthFile): void {
 
 export function loadCache(): CacheFile {
 	try {
-		return readJson<CacheFile>(cachePath(), {});
+		return dict(readJson<CacheFile>(cachePath(), {}));
 	} catch {
-		// 缓存坏了就当没有，下次刷新会重写。
-		return {};
+		// 缓存坏了就当没有，下次刷新会重写。同样不带原型，服务名 constructor 读不到继承的属性。
+		return dict({});
 	}
 }
 
@@ -149,6 +155,54 @@ export function loadModelsDevFile(): unknown {
 /** 文件只给插件读，不缩进，减小体积。 */
 export function saveModelsDevFile(file: ModelsDevFile, path = modelsDevPath()): void {
 	writeJson(path, file, { compact: true });
+}
+
+/** 插件自己记下的运行状态，丢了也只会多提示一次。 */
+export interface StateFile {
+	/** 按服务名记录已经在 pi 里提示过的新版（开关关着时）。 */
+	notifiedUpdates: Record<string, NotifiedUpdate[]>;
+}
+
+/** 提示过的一个替换，`at` 是提示的时间（毫秒时间戳）。 */
+export interface NotifiedUpdate extends Replacement {
+	at: number;
+}
+
+/**
+ * 读状态文件。文件损坏或结构不对时按空处理，只取自有属性，不合规的记录丢掉。
+ * 没有 `at` 或 `at` 不是有限数的记录按 0 处理，即已经过了重新提示的间隔。
+ */
+export function loadState(): StateFile {
+	const result = dict<NotifiedUpdate[]>({});
+	let raw: unknown;
+	try {
+		raw = readJson<unknown>(statePath(), {});
+	} catch {
+		return { notifiedUpdates: result };
+	}
+	const notified = isRecord(raw) && isRecord(raw.notifiedUpdates) ? raw.notifiedUpdates : {};
+	for (const [name, list] of Object.entries(notified)) {
+		if (!Array.isArray(list)) continue;
+		const valid = list.filter((item): item is NotifiedUpdate => isRecord(item) && typeof item.from === "string" && typeof item.to === "string");
+		if (valid.length) result[name] = valid.map(({ from, to, at }) => ({ from, to, at: Number.isFinite(at) ? at : 0 }));
+	}
+	return { notifiedUpdates: result };
+}
+
+export function saveState(state: StateFile): void {
+	writeJson(statePath(), state);
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * 按服务名取值的对象一律没有原型：`constructor` 这类合法的服务名在普通对象上会读到继承来的属性。
+ * 只复制自有属性；JSON 里的 `__proto__` 键在没有原型的对象上是普通属性。
+ */
+export function dict<T>(value: Record<string, T>): Record<string, T> {
+	const result = Object.create(null) as Record<string, T>;
+	if (isRecord(value)) for (const [key, item] of Object.entries(value)) result[key] = item as T;
+	return result;
 }
 
 export type KeySource = "env" | "file";
