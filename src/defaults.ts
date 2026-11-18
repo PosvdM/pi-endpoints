@@ -17,6 +17,18 @@ function open(): SettingsManager {
 	return settings;
 }
 
+/**
+ * 本插件对 pi 全局设置的读、改、写排成一条队列，一次只做一个。SettingsManager 打开时读一次文件、保存时写回改过的字段，
+ * 两次修改同时进行时，后保存的会用自己读到的旧列表覆盖前一次对 enabledModels 的修改。
+ */
+let queue: Promise<unknown> = Promise.resolve();
+
+function serialized<T>(task: () => Promise<T>): Promise<T> {
+	const run = queue.then(task, task);
+	queue = run.catch(() => {});
+	return run;
+}
+
 /** pi 新开会话时用的默认模型，和 /model 里标为 default 的是同一个。 */
 export function readDefaultModel(): DefaultModel | undefined {
 	let settings: SettingsManager;
@@ -31,7 +43,11 @@ export function readDefaultModel(): DefaultModel | undefined {
 }
 
 /** 效果和在 pi 的 /model 里按 Ctrl+S 相同。 */
-export async function writeDefaultModel(provider: string, id: string): Promise<void> {
+export function writeDefaultModel(provider: string, id: string): Promise<void> {
+	return serialized(() => writeDefaultModelNow(provider, id));
+}
+
+async function writeDefaultModelNow(provider: string, id: string): Promise<void> {
 	const settings = open();
 	// pi 在设置了 Ctrl+P 轮换列表时会把新的默认模型加进去。这里只比对完整的模型名，不展开通配符。
 	// 列表不是数组时不动它，照样写入默认模型；数组里不是字符串的项不参与比对。
@@ -47,7 +63,11 @@ export async function writeDefaultModel(provider: string, id: string): Promise<v
 }
 
 /** 删掉 settings.json 里的默认模型，pi 新开会话时改用 Ctrl+P 列表的第一个或 pi 自带的默认模型。 */
-export async function clearDefaultModel(): Promise<void> {
+export function clearDefaultModel(): Promise<void> {
+	return serialized(clearDefaultModelNow);
+}
+
+async function clearDefaultModelNow(): Promise<void> {
 	const settings = open();
 	// 类型只允许字符串；写入时值为 undefined 的字段会从 JSON 里去掉。
 	settings.setDefaultModelAndProvider(undefined as unknown as string, undefined as unknown as string);
@@ -59,7 +79,11 @@ export async function clearDefaultModel(): Promise<void> {
  * 默认模型是旧模型时改成新模型；Ctrl+P 轮换列表里精确等于 `<服务商>/<旧 id>` 的项换成新模型，
  * 新模型已经在列表里时只删掉旧的。列表不是数组时不动它。没有变化时不写文件。
  */
-export async function replaceModels(provider: string, replacements: ReadonlyMap<string, string>): Promise<void> {
+export function replaceModels(provider: string, replacements: ReadonlyMap<string, string>): Promise<void> {
+	return serialized(() => replaceModelsNow(provider, replacements));
+}
+
+async function replaceModelsNow(provider: string, replacements: ReadonlyMap<string, string>): Promise<void> {
 	if (replacements.size === 0) return;
 	const settings = open();
 	let changed = false;

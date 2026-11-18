@@ -653,7 +653,8 @@ const isDefault = (item, model) => state.defaultModel?.provider === item.name &&
 function refreshDrawerHead() {
 	const item = service();
 	const model = item?.models.find((entry) => entry.id === openModel);
-	if (model) $("#drawer-star")?.replaceChildren(star(item, model));
+	// 模型已经不在状态里时清掉星标：它可能还显示着旧的默认模型，点了会清掉刚换上的新默认模型。
+	$("#drawer-star")?.replaceChildren(...(model ? [star(item, model)] : []));
 	const toggle = $("#drawer-toggle");
 	if (openModel && toggle && !toggle.hasAttribute("aria-disabled")) {
 		toggle.checked = Boolean(model?.enabled);
@@ -1066,6 +1067,7 @@ function render() {
 		parts.push(renderHead(item));
 		// 刷新失败时页面顶部已经显示了同样的原因，关掉顶部提示后再显示这一条。
 		if (item.status?.error && error !== `刷新失败：${item.status.error}`) parts.push(h("div", { class: "banner err" }, `错误：${item.status.error}`));
+		if (item.status?.syncError) parts.push(h("div", { class: "banner err" }, `配置已保存，但没能更新运行中的 pi：${item.status.syncError}。请在 pi 里运行 /reload。`));
 		if (!item.status?.keySource) {
 			parts.push(h("div", { class: "banner warn" }, h("span", { class: "grow" }, "还没有设置密钥，模型不会注册到 pi。"),
 				h("button", { class: "btn small", onclick: () => { tab = "settings"; render(); } }, "去设置")));

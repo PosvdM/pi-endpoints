@@ -297,12 +297,9 @@ function due(now: number): boolean {
 	return !data || now - data.checkedAt >= CHECK_INTERVAL_MS;
 }
 
-/**
- * 本进程里还没有 models.dev 数据，或者数据到了该重新下载的时候（失败后的 30 分钟内不算）。
- * 这时模型的类型可能还不准，“每系最新”推迟到下次刷新。
- */
-export function modelsDevPending(now = Date.now()): boolean {
-	return !data || due(now);
+/** 本进程里有没有 models.dev 数据：读到过有效的本地文件，或者下载成功过。“每系最新”没有它时推迟。 */
+export function hasModelsDevData(): boolean {
+	return data !== undefined;
 }
 
 /**

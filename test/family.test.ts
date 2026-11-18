@@ -23,7 +23,8 @@ describe("familyOf", () => {
 		expect(familyOf("claude-3-5-sonnet-20241022")).toEqual({ family: "claude-sonnet", version: ["3", "5"], date: ["20241022"] });
 		expect(familyOf("deepseek-v3-0324")).toEqual({ family: "deepseek", version: ["3"], date: ["0324"] });
 		expect(familyOf("deepseek-v3-1120")).toEqual({ family: "deepseek", version: ["3"], date: ["1120"] });
-		expect(familyOf("qwen-3-2024-08-06")).toEqual({ family: "qwen", version: ["3"], date: ["2024", "08", "06"] });
+		expect(familyOf("qwen-3-2024-08-06")).toEqual({ family: "qwen", version: ["3"], date: ["20240806"] });
+		expect(familyOf("qwen-3-2024-8-6")?.date).toEqual(["20240806"]);
 	});
 
 	it("版本段只能是不超过 3 位的数字或含 . 的数字，只取第一串", () => {
@@ -125,6 +126,18 @@ describe("pickLatest", () => {
 	it("目录里还在的同版本多个 id 都保留", () => {
 		const catalog = ["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"];
 		expect(pickLatest(["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"], catalog, catalog).replacements).toEqual([]);
+	});
+
+	it("拆开写的日期归一后再比较，不会把新版当成旧版", () => {
+		const catalog = ["m-v1-20231201", "m-v1-2024-08-06"];
+		expect(pickLatest(["m-v1-20231201"], catalog, catalog).enabled).toEqual(["m-v1-2024-08-06"]);
+		expect(pickLatest(["m-v1-2024-08-06"], catalog, catalog).replacements).toEqual([]);
+	});
+
+	it("要启用新 id 时，有带日期的选日期最新的，否则选不带日期的", () => {
+		const both = ["claude-sonnet-4-5", "claude-sonnet-4-5-20250101", "claude-sonnet-4-5-20250929"];
+		expect(pickLatest(["claude-sonnet-4"], both, both).enabled).toEqual(["claude-sonnet-4-5-20250929"]);
+		expect(pickLatest(["claude-sonnet-4"], ["claude-sonnet-4-5"], ["claude-sonnet-4-5"]).enabled).toEqual(["claude-sonnet-4-5"]);
 	});
 
 	it("deepseek-v3 的日期版本按日期比较，和不带日期的 deepseek-v3 算同一版本", () => {

@@ -15,7 +15,11 @@ const writeModelsDev = () =>
 		JSON.stringify({ version: 1, fetchedAt: Date.now(), checkedAt: Date.now(), providers: devModels }),
 	);
 
+/** 为真时 models.dev 返回 503。 */
+let modelsDevDown = false;
+
 beforeEach(() => {
+	modelsDevDown = false;
 	temp = useTempAgentDir();
 	setModelsDevForTest(undefined);
 	// 默认 models.dev 数据已经就绪；冷缓存的用例自己删掉这个文件。
@@ -38,6 +42,7 @@ type Catalogs = Record<string, { ids: string[]; hidden?: string[]; gate?: Promis
 function stubNetwork(catalogs: Catalogs) {
 	vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
 		if (url === MODELS_DEV_URL) {
+			if (modelsDevDown) return Promise.resolve(new Response("down", { status: 503 }));
 			const v2 = Object.fromEntries(Object.entries(devModels).map(([provider, models]) => [provider, { id: provider, models }]));
 			return Promise.resolve(new Response(JSON.stringify(v2)));
 		}
@@ -62,6 +67,7 @@ function fakeRuntime() {
 	const controllers = new Map<string, AbortController>();
 	const published = new Map<string, string[]>();
 	let registrations = 0;
+	let failRegister = false;
 	async function refreshOne(name: string, allowNetwork: boolean): Promise<"published" | "superseded" | "failed"> {
 		controllers.get(name)?.abort();
 		const controller = new AbortController();
@@ -80,6 +86,7 @@ function fakeRuntime() {
 	};
 	const pi = {
 		registerProvider: (name: string, config: ProviderConfig) => {
+			if (failRegister) throw new Error("注册被拒绝");
 			registrations++;
 			providers.set(name, config);
 			offlineAll();
@@ -94,6 +101,9 @@ function fakeRuntime() {
 		providers,
 		published,
 		registrations: () => registrations,
+		failRegistration: (fail: boolean) => {
+			failRegister = fail;
+		},
 		/** 像 pi 启动后那样，同一批联网刷新所有服务商。 */
 		refreshAll: (names: string[]) => Promise.all(names.map((name) => refreshOne(name, true))),
 	};
@@ -142,22 +152,28 @@ describe("每系最新", () => {
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 	});
 
-	it("refreshModels 只保存结果、返回新模型由 pi 发布，不重新注册；换掉目录里已经没有的旧 id", async () => {
+	it("pi 联网刷新时的迁移只改磁盘：内存和返回给 pi 的列表不变，不注册，提示用户", async () => {
 		const { endpoints, catalogs, published, registrations, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		writeFileSync(settingsFile(), JSON.stringify({ defaultProvider: "cpa", defaultModel: "gpt-6.1-sol", enabledModels: ["cpa/gpt-6.1-sol"] }));
 		catalogs["cpa.test"].ids = ["gpt-6.2-sol"];
 		const notes: string[] = [];
 		endpoints.notify = (message) => notes.push(message);
 		const before = registrations();
 		expect(await refreshModels()).toEqual(["published"]);
-		expect(published.get("cpa")).toEqual(["gpt-6.2-sol"]);
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.2-sol"]);
-		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.2-sol"]);
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ defaultProvider: "cpa", defaultModel: "gpt-6.2-sol", enabledModels: ["cpa/gpt-6.2-sol"] });
+		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.1-sol"]);
+		expect(published.get("cpa")).toEqual(["gpt-6.1-sol"]);
 		await tick();
 		expect(registrations()).toBe(before);
-		expect(notes).toEqual(["cpa：gpt-6.1-sol → gpt-6.2-sol。当前会话请用 /model 切换"]);
+		expect(notes).toEqual(["cpa：gpt-6.1-sol → gpt-6.2-sol 已写入配置，新会话生效，当前 pi 用 /reload"]);
+
+		// 本进程之后经过 beginChange() 的修改读到新配置。
+		endpoints.setOverride("cpa", "gpt-6.2-sol", { contextWindow: 1000 });
+		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.2-sol"]);
 	});
 
-	it("同一批刷新里，快的服务换了模型也不会取消慢的服务的联网刷新", async () => {
+	it("同一批刷新里，快的服务迁移不会取消慢的服务的联网刷新；两个服务的旧项都在 pi 设置里换掉", async () => {
 		let release: () => void = () => {};
 		const gate = new Promise<void>((resolve) => (release = resolve));
 		const catalogs: Catalogs = { "fast.test": { ids: ["gpt-6.1-sol"] }, "slow.test": { ids: ["m-1"] } };
@@ -170,6 +186,7 @@ describe("每系最新", () => {
 			await endpoints.refresh(name);
 			await endpoints.setLatestPerFamily(name, true);
 		}
+		writeFileSync(settingsFile(), JSON.stringify({ enabledModels: ["fast/gpt-6.1-sol", "slow/m-1", "x/y"] }));
 		catalogs["fast.test"].ids = ["gpt-6.2-sol"];
 		catalogs["slow.test"] = { ids: ["m-1", "m-2"], gate };
 		const batch = runtime.refreshAll(["fast", "slow"]);
@@ -177,9 +194,25 @@ describe("每系最新", () => {
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.2-sol"]);
 		release();
 		expect(await batch).toEqual(["published", "published"]);
-		expect(runtime.published.get("fast")).toEqual(["gpt-6.2-sol"]);
-		expect(runtime.published.get("slow")).toEqual(["m-2"]);
 		expect(endpoints.catalog("slow")?.models.map((model) => model.id)).toEqual(["m-1", "m-2"]);
+		expect(readConfig().services.map((service: { enabled: string[] }) => service.enabled)).toEqual([["gpt-6.2-sol"], ["m-2"]]);
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).enabledModels).toEqual(["fast/gpt-6.2-sol", "slow/m-2", "x/y"]);
+	});
+
+	it("两个服务同时迁移时，pi 设置的修改排队进行，enabledModels 里两个旧项都换掉", async () => {
+		const catalogs: Catalogs = { "a.test": { ids: ["gpt-6.1-sol"] }, "b.test": { ids: ["m-1"] } };
+		stubNetwork(catalogs);
+		const runtime = fakeRuntime();
+		const endpoints = new Endpoints(runtime.pi);
+		for (const [name, enabled] of [["a", "gpt-6.1-sol"], ["b", "m-1"]]) {
+			endpoints.saveService({ name, baseUrl: `https://${name}.test`, enabled: [enabled], overrides: {}, latestPerFamily: true });
+			endpoints.setKey(name, "k");
+		}
+		writeFileSync(settingsFile(), JSON.stringify({ enabledModels: ["a/gpt-6.1-sol", "b/m-1"] }));
+		catalogs["a.test"].ids = ["gpt-6.2-sol"];
+		catalogs["b.test"].ids = ["m-2"];
+		await runtime.refreshAll(["a", "b"]);
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).enabledModels).toEqual(["a/gpt-6.2-sol", "b/m-2"]);
 	});
 
 	it("管理页刷新时只注册最终结果一次", async () => {
@@ -246,6 +279,23 @@ describe("每系最新", () => {
 		await endpoints.updateModelsDev();
 		await refreshModels();
 		expect(readConfig().services[0].enabled).toEqual(["jev-test-3"]);
+	});
+
+	it("开关开着的服务算作需要 models.dev；从没拿到过数据时推迟", async () => {
+		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+		modelsDevDown = true;
+		const full = { contextWindow: 1000, maxTokens: 100, input: ["text" as const], thinkingLevels: [], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+		const { endpoints, catalogs, refreshModels } = await setup(["m-1"], ["m-1"]);
+		for (const id of ["m-1", "m-2"]) endpoints.setOverride("cpa", id, full);
+		expect(endpoints.needsModelsDev()).toBe(false);
+		catalogs["cpa.test"].ids = ["m-1", "m-2"];
+		await endpoints.refresh("cpa");
+		await endpoints.setLatestPerFamily("cpa", true);
+		expect(endpoints.needsModelsDev()).toBe(true);
+		expect(readConfig().services[0]).toMatchObject({ latestPerFamily: true, enabled: ["m-1"] });
+		await refreshModels();
+		await endpoints.refreshForPage("cpa");
+		expect(readConfig().services[0].enabled).toEqual(["m-1"]);
 	});
 
 	it("管理页刷新在冷缓存时先等 models.dev", async () => {
@@ -328,6 +378,46 @@ describe("每系最新", () => {
 		expect(endpoints.loadError).toContain("endpoints-auth.json");
 		expect(endpoints.apiKey("cpa")).toBe("k");
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
+	});
+
+	it("显式入口保存后注册出错：记下原因，照常返回、替换默认模型并提示", async () => {
+		const { endpoints, failRegistration } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
+		writeFileSync(settingsFile(), JSON.stringify({ defaultProvider: "cpa", defaultModel: "gpt-6.1-sol" }));
+		const notes: string[] = [];
+		endpoints.notify = (message) => notes.push(message);
+		failRegistration(true);
+		await endpoints.setLatestPerFamily("cpa", true);
+		expect(readConfig().services[0]).toMatchObject({ latestPerFamily: true, enabled: ["gpt-6.2-sol"] });
+		expect(endpoints.status()[0].syncError).toContain("注册被拒绝");
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).defaultModel).toBe("gpt-6.2-sol");
+		expect(notes).toEqual(["cpa：gpt-6.1-sol → gpt-6.2-sol。当前会话请用 /model 切换"]);
+		failRegistration(false);
+		endpoints.registerAll();
+		expect(endpoints.status()[0].syncError).toBeUndefined();
+	});
+
+	it("后台 models.dev 更新后注册出错不会产生未处理的拒绝", async () => {
+		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+		const { endpoints, failRegistration } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { preset: true });
+		failRegistration(true);
+		await endpoints.updateModelsDev();
+		expect(endpoints.status()[0].syncError).toContain("注册被拒绝");
+	});
+
+	it("管理页并行刷新多个服务时，共享的 models.dev 下载完成后只全量注册一次", async () => {
+		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+		const catalogs: Catalogs = { "a.test": { ids: ["m-1"] }, "b.test": { ids: ["n-1"] } };
+		stubNetwork(catalogs);
+		const runtime = fakeRuntime();
+		const endpoints = new Endpoints(runtime.pi);
+		for (const name of ["a", "b"]) {
+			endpoints.saveService({ name, baseUrl: `https://${name}.test`, enabled: [name === "a" ? "m-1" : "n-1"], overrides: {} });
+			endpoints.setKey(name, "k");
+		}
+		const before = runtime.registrations();
+		expect(await Promise.all([endpoints.refreshForPage("a"), endpoints.refreshForPage("b")])).toEqual([undefined, undefined]);
+		// 一次全量注册（两个服务），另一次刷新只注册自己的服务。
+		expect(runtime.registrations()).toBe(before + 3);
 	});
 
 	describe("pi 设置", () => {

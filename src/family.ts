@@ -8,7 +8,7 @@ export interface FamilyMember {
 	family: string;
 	/** 版本号各段的十进制数字串，`6.2` 是 ["6", "2"]，`5-5` 也是 ["5", "5"]。 */
 	version: string[];
-	/** 日期各段的十进制数字串，如 ["20250929"]、["2024", "08", "06"]；没有日期时为空数组。版本相同时才比较。 */
+	/** 日期各段的十进制数字串，如 ["20250929"]、["0324"]；`2024-08-06` 归一成 ["20240806"]。没有日期时为空数组。版本相同时才比较。 */
 	date: string[];
 }
 
@@ -50,6 +50,7 @@ export function familyOf(id: string): FamilyMember | undefined {
 			afterDate = false;
 		}
 	}
+	normalizeDate(date);
 	const version: string[] = [];
 	const rest: string[] = [];
 	// 只取第一串连续的版本段，后面再出现的数字段留在系列名里。
@@ -65,6 +66,17 @@ export function familyOf(id: string): FamilyMember | undefined {
 	}
 	if (version.length === 0 || rest.length === 0) return undefined;
 	return { family: prefix + rest.join("-"), version, date };
+}
+
+/**
+ * 把拆开写的日期 `YYYY-MM-DD` 归一成紧凑的 `YYYYMMDD`，和 `20231201` 这种写法能直接比较，
+ * 否则 `2024-08-06` 的第一段 2024 会小于 20231201，新版被当成旧版。
+ */
+function normalizeDate(date: string[]): void {
+	const [year, month, day] = date;
+	if (date.length === 3 && year.length === 4 && DATE_PART.test(month) && DATE_PART.test(day)) {
+		date.splice(0, 3, year + month.padStart(2, "0") + day.padStart(2, "0"));
+	}
 }
 
 /** 比较两个十进制数字串，不转成数字，避免很长的数字溢出。 */
@@ -137,6 +149,7 @@ function newest(entries: Entry[]): { top: Entry[]; best: Pick<FamilyMember, "ver
  * 只剩 `claude-sonnet-4-5-20250929`）。目录里还在的同版本多个 id 都保留。
  * 已启用的成员里有不能被取代、又不是最新版的（比最新版还新，或者同版本但在目录里被隐藏），而最新版都没启用时，
  * 整个系列不动，免得降级。候选里没有这个系列的成员、以及不属于任何系列的模型都不动。
+ * 要启用新的 id 时，最新版里有带日期的就选日期最新的，否则选不带日期的。
  */
 export function pickLatest(enabled: readonly string[], candidates: readonly string[], catalog: readonly string[]): LatestResult {
 	const candidateFamilies = groupByFamily(candidates);
@@ -156,7 +169,8 @@ export function pickLatest(enabled: readonly string[], candidates: readonly stri
 		let target: string;
 		if (kept.length) target = kept[0].id;
 		else if (superseded.length < current.length) continue;
-		else target = top[0].id;
+		// 最新版里有带日期的 id 时选它（日期最新的那个），否则选不带日期的。
+		else target = (top.find((item) => item.member.date.length) ?? top[0]).id;
 		for (const entry of superseded) remove.set(entry.id, target);
 	}
 	if (remove.size === 0) return { enabled: [...enabled], replacements: [] };
