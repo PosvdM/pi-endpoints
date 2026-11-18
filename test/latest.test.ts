@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Endpoints } from "../src/endpoints.ts";
-import { MODELS_DEV_URL, setModelsDevForTest } from "../src/modelsdev.ts";
+import { loadModelsDev, MODELS_DEV_URL, setModelsDevForTest } from "../src/modelsdev.ts";
 import { useTempAgentDir } from "./helpers.ts";
 
 let temp: ReturnType<typeof useTempAgentDir>;
@@ -158,7 +158,7 @@ describe("每系最新", () => {
 		writeFileSync(settingsFile(), JSON.stringify({ defaultProvider: "cpa", defaultModel: "gpt-6.1-sol", enabledModels: ["cpa/gpt-6.1-sol"] }));
 		catalogs["cpa.test"].ids = ["gpt-6.2-sol"];
 		const notes: string[] = [];
-		endpoints.notify = (message) => notes.push(message);
+		endpoints.notify = (message) => notes.push(message) > 0;
 		const before = registrations();
 		expect(await refreshModels()).toEqual(["published"]);
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.2-sol"]);
@@ -470,7 +470,7 @@ describe("每系最新", () => {
 		const { endpoints, failRegistration } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
 		writeFileSync(settingsFile(), JSON.stringify({ defaultProvider: "cpa", defaultModel: "gpt-6.1-sol" }));
 		const notes: string[] = [];
-		endpoints.notify = (message) => notes.push(message);
+		endpoints.notify = (message) => notes.push(message) > 0;
 		failRegistration(true);
 		await endpoints.setLatestPerFamily("cpa", true);
 		expect(readConfig().services[0]).toMatchObject({ latestPerFamily: true, enabled: ["gpt-6.2-sol"] });
@@ -538,6 +538,243 @@ describe("每系最新", () => {
 			await setup(["gpt-6.1-sol"], ["gpt-6.2-sol"], { on: true });
 			expect(readConfig().services[0].enabled).toEqual(["gpt-6.2-sol"]);
 			expect(readFileSync(settingsFile(), "utf8")).toBe("{ broken");
+		});
+	});
+});
+
+describe("新版提醒", () => {
+	const stateFile = () => join(temp.dir, "endpoints-state.json");
+	const readState = () => JSON.parse(readFileSync(stateFile(), "utf8"));
+
+	/** 记下提示；`shown` 为假时模仿没有界面的 pi，提示被丢掉。 */
+	function listen(endpoints: Endpoints, shown = true) {
+		const notes: [string, string][] = [];
+		endpoints.notify = (message, level) => {
+			if (shown) notes.push([message, level]);
+			return shown;
+		};
+		return notes;
+	}
+
+	it("开关关着、目录出了新版时用 warning 提示一次，不改配置和 pi 设置；同一个替换不再提示，出了更新的版本再提示", async () => {
+		const { endpoints, catalogs, registrations, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		endpoints.saveService({ name: "cpa", displayName: "Magpie", baseUrl: "https://cpa.test" } as never, "cpa");
+		writeFileSync(settingsFile(), JSON.stringify({ defaultProvider: "cpa", defaultModel: "gpt-6.1-sol" }));
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		const before = registrations();
+		expect(await refreshModels()).toEqual(["published"]);
+		expect(notes).toEqual([
+			["Magpie 有新版模型：gpt-6.1-sol → gpt-6.2-sol。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。", "warning"],
+		]);
+		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
+		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).defaultModel).toBe("gpt-6.1-sol");
+		expect(readState()).toEqual({ notifiedUpdates: { cpa: [{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }] } });
+		await tick();
+		expect(registrations()).toBe(before);
+
+		// 另一个 pi 进程（新的实例）读同一个记录，也不再提示。
+		await refreshModels();
+		const other = fakeRuntime();
+		const second = new Endpoints(other.pi);
+		second.registerAll();
+		const otherNotes = listen(second);
+		await other.refreshAll(["cpa"]);
+		expect(notes).toHaveLength(1);
+		expect(otherNotes).toEqual([]);
+
+		// 出了 6.3，待处理的替换变成 6.1 → 6.3，提示一次，旧记录去掉。
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-sol"];
+		await refreshModels();
+		expect(notes.map(([message]) => message)[1]).toContain("gpt-6.1-sol → gpt-6.3-sol");
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.3-sol" }]);
+
+		// 用户自己换成新版后没有待处理的替换，记录清掉。
+		endpoints.setEnabled("cpa", "gpt-6.1-sol", false);
+		endpoints.setEnabled("cpa", "gpt-6.3-sol", true);
+		await refreshModels();
+		expect(notes).toHaveLength(2);
+		expect(readState()).toEqual({ notifiedUpdates: {} });
+	});
+
+	it("同一服务的多个替换拼成一条，没有显示名时用服务名", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol", "claude-opus-5-5"], ["gpt-6.1-sol", "claude-opus-5-5"]);
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol", "claude-opus-5-5", "claude-opus-5-6"];
+		await refreshModels();
+		expect(notes).toEqual([
+			["cpa 有新版模型：gpt-6.1-sol → gpt-6.2-sol、claude-opus-5-5 → claude-opus-5-6。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。", "warning"],
+		]);
+	});
+
+	it("开关开着时直接迁移，不发新版提醒", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		await refreshModels();
+		expect(notes).toEqual([["cpa：gpt-6.1-sol → gpt-6.2-sol 已写入配置，新会话生效，当前 pi 用 /reload", "info"]]);
+		expect(existsSync(stateFile())).toBe(false);
+	});
+
+	it("没有界面时提示被丢掉，不记成已提示，下次有界面时再提示", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		listen(endpoints, false);
+		await refreshModels();
+		expect(existsSync(stateFile())).toBe(false);
+		endpoints.notify = undefined;
+		await refreshModels();
+		expect(existsSync(stateFile())).toBe(false);
+		const notes = listen(endpoints);
+		await refreshModels();
+		expect(notes).toHaveLength(1);
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+	});
+
+	it("目录刷新失败时不提示；记录文件损坏时按空处理，再提示一次", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		await endpoints.refresh("cpa");
+		vi.stubGlobal("fetch", async () => new Response("down", { status: 503 }));
+		expect(await refreshModels()).toEqual(["failed"]);
+		expect(notes).toEqual([]);
+
+		stubNetwork(catalogs);
+		writeFileSync(stateFile(), "{ broken");
+		await refreshModels();
+		expect(notes).toHaveLength(1);
+		expect(readState().notifiedUpdates.cpa).toHaveLength(1);
+	});
+
+	it("models.dev 没有数据时推迟，不提示也不记录；有数据后的下次刷新再提示，非对话模型不算新版", async () => {
+		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+		modelsDevDown = true;
+		const { endpoints, catalogs, refreshModels } = await setup(["jev-test-1"], ["jev-test-1"]);
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["jev-test-1", "jev-test-2", "jev-test-3"];
+		await refreshModels();
+		await tick();
+		expect(notes).toEqual([]);
+		expect(existsSync(stateFile())).toBe(false);
+		expect(endpoints.updates("cpa")).toEqual([]);
+
+		writeModelsDev();
+		loadModelsDev();
+		await refreshModels();
+		expect(notes.map(([message]) => message)).toEqual([expect.stringContaining("jev-test-1 → jev-test-3")]);
+	});
+
+	describe("是否需要 models.dev", () => {
+		const full = { contextWindow: 1000, maxTokens: 100, input: ["text" as const], thinkingLevels: [], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+
+		it("开关关着时，目录里有候选新版才需要；没有候选时不下载", async () => {
+			rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+			const { endpoints, catalogs, refreshModels } = await setup(["m-1"], ["m-1"]);
+			for (const id of ["m-1", "m-2", "m-3"]) endpoints.setOverride("cpa", id, full);
+			expect(endpoints.needsModelsDev()).toBe(false);
+			await refreshModels();
+			await endpoints.updateModelsDev();
+			expect(existsSync(join(temp.dir, "endpoints-modelsdev.json"))).toBe(false);
+
+			// 候选只有隐藏模型时也不需要。
+			catalogs["cpa.test"] = { ids: ["m-1", "m-2"], hidden: ["m-2"] };
+			await endpoints.refresh("cpa");
+			expect(endpoints.needsModelsDev()).toBe(false);
+
+			// 停用的服务不算。
+			catalogs["cpa.test"] = { ids: ["m-1", "m-3"] };
+			await endpoints.refresh("cpa");
+			endpoints.setServiceDisabled("cpa", true);
+			expect(endpoints.needsModelsDev()).toBe(false);
+			endpoints.setServiceDisabled("cpa", false);
+			expect(endpoints.needsModelsDev()).toBe(true);
+		});
+
+		it("有候选新版时 pi 联网刷新会在后台下载", async () => {
+			rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+			const { endpoints, catalogs, refreshModels } = await setup(["m-1"], ["m-1"]);
+			for (const id of ["m-1", "m-2"]) endpoints.setOverride("cpa", id, full);
+			catalogs["cpa.test"].ids = ["m-1", "m-2"];
+			await refreshModels();
+			await endpoints.updateModelsDev();
+			expect(existsSync(join(temp.dir, "endpoints-modelsdev.json"))).toBe(true);
+		});
+
+		it("目录缓存的来源地址和服务地址不同时不算候选", async () => {
+			const { endpoints } = await setup(["m-1"], ["m-1"]);
+			for (const id of ["m-1", "m-2"]) endpoints.setOverride("cpa", id, full);
+			writeFileSync(
+				join(temp.dir, "endpoints-cache.json"),
+				JSON.stringify({ cpa: { fetchedAt: 1, codex: false, baseUrl: "https://old.test", models: [{ id: "m-1" }, { id: "m-2" }] } }),
+			);
+			endpoints.setKey("cpa", "k");
+			expect(endpoints.needsModelsDev()).toBe(false);
+			expect(endpoints.updates("cpa")).toEqual([]);
+		});
+	});
+
+	describe("updates", () => {
+		it("开关关着时列出打开开关会发生的替换；开着、停用、服务有问题时为空", async () => {
+			const { endpoints } = await setup(["gpt-6.1-sol", "other"], ["gpt-6.1-sol", "gpt-6.2-sol", "other"]);
+			expect(endpoints.updates("cpa")).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+			expect(endpoints.updates("nope")).toEqual([]);
+			endpoints.setServiceDisabled("cpa", true);
+			expect(endpoints.updates("cpa")).toEqual([]);
+			endpoints.setServiceDisabled("cpa", false);
+
+			const config = readConfig();
+			config.services[0].apiKeyEnv = "$BAD";
+			writeFileSync(configFile(), JSON.stringify(config));
+			expect(new Endpoints(fakeRuntime().pi).updates("cpa")).toEqual([]);
+			config.services[0].apiKeyEnv = undefined;
+			writeFileSync(configFile(), JSON.stringify(config));
+
+			await endpoints.setLatestPerFamily("cpa", true);
+			expect(endpoints.updates("cpa")).toEqual([]);
+		});
+
+		it("models.dev 没有数据时为空", async () => {
+			const { endpoints } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
+			setModelsDevForTest(undefined);
+			expect(endpoints.updates("cpa")).toEqual([]);
+		});
+	});
+
+	describe("applyLatestOnce", () => {
+		it("只替换这一次，不改开关；替换 pi 设置、提示并只注册一次", async () => {
+			const { endpoints, providers, registrations } = await setup(["gpt-6.1-sol", "other"], ["gpt-6.1-sol", "gpt-6.2-sol", "other"]);
+			writeFileSync(settingsFile(), JSON.stringify({ defaultProvider: "cpa", defaultModel: "gpt-6.1-sol", enabledModels: ["cpa/gpt-6.1-sol"] }));
+			const notes = listen(endpoints);
+			const before = registrations();
+			expect(await endpoints.applyLatestOnce("cpa")).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+			expect(registrations()).toBe(before + 1);
+			const saved = readConfig().services[0];
+			expect(saved.enabled).toEqual(["gpt-6.2-sol", "other"]);
+			expect(saved.latestPerFamily).toBeUndefined();
+			expect(endpoints.service("cpa")?.latestPerFamily).toBeUndefined();
+			expect(providers.get("cpa")?.models?.map((model) => model.id)).toEqual(["gpt-6.2-sol", "other"]);
+			expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ defaultProvider: "cpa", defaultModel: "gpt-6.2-sol", enabledModels: ["cpa/gpt-6.2-sol"] });
+			expect(notes).toEqual([["cpa：gpt-6.1-sol → gpt-6.2-sol。当前会话请用 /model 切换", "info"]]);
+			expect(endpoints.updates("cpa")).toEqual([]);
+		});
+
+		it("没有可换的时返回空数组，不写文件、不注册；服务不存在时报错", async () => {
+			const { endpoints, registrations } = await setup(["gpt-6.2-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
+			const config = readFileSync(configFile(), "utf8");
+			const before = registrations();
+			expect(await endpoints.applyLatestOnce("cpa")).toEqual([]);
+			expect(readFileSync(configFile(), "utf8")).toBe(config);
+			expect(registrations()).toBe(before);
+			await expect(endpoints.applyLatestOnce("nope")).rejects.toThrow("没有名为 nope 的服务");
+		});
+
+		it("models.dev 拿不到数据时不换", async () => {
+			rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+			modelsDevDown = true;
+			const { endpoints } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
+			expect(await endpoints.applyLatestOnce("cpa")).toEqual([]);
+			expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 		});
 	});
 });

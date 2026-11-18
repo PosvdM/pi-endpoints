@@ -188,6 +188,48 @@ describe("管理页的操作", () => {
 		expect(state.services[0].latestPerFamily).toBe(false);
 	});
 
+	it("状态里带待处理的新版，applyLatestOnce 只替换一次、不改开关", async () => {
+		const modelsDev = { moonshotai: { id: "moonshotai", models: { "kimi-k9": { limit: { context: 1000, output: 100 } } } } };
+		const ids = ["gpt-6-sol", "gpt-6.1-sol"];
+		vi.stubGlobal("fetch", async (url: string) =>
+			new Response(
+				JSON.stringify(
+					url === MODELS_DEV_URL ? modelsDev : url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) },
+				),
+			),
+		);
+		await call("/api/saveService", { apiKey: "sk-1", service: { name: "relay", baseUrl: "https://relay.test" } });
+		let state = await (await call("/api/setEnabled", { name: "relay", id: "gpt-6-sol", enabled: true })).json();
+		// 还没有 models.dev 数据，判断不了候选是不是对话模型。目录里有候选新版，所以刷新时会下载。
+		expect(state.services[0].updates).toEqual([]);
+		state = await (await call("/api/refresh", { name: "relay" })).json();
+		expect(state.services[0]).toMatchObject({ latestPerFamily: false, updates: [{ from: "gpt-6-sol", to: "gpt-6.1-sol" }] });
+
+		state = await (await call("/api/applyLatestOnce", { name: "relay" })).json();
+		expect(state.replaced).toEqual([{ from: "gpt-6-sol", to: "gpt-6.1-sol" }]);
+		expect(state.services[0]).toMatchObject({ latestPerFamily: false, updates: [] });
+		expect(state.services[0].models.filter((model: { enabled: boolean }) => model.enabled).map((model: { id: string }) => model.id)).toEqual(["gpt-6.1-sol"]);
+
+		state = await (await call("/api/applyLatestOnce", { name: "relay" })).json();
+		expect(state.replaced).toEqual([]);
+		const missing = await call("/api/applyLatestOnce", { name: "nope" });
+		expect(missing.status).toBe(400);
+		expect((await missing.json()).error).toContain("nope");
+	});
+
+	it("新建服务时保存 latestPerFamily，不传时关闭；编辑已有服务时忽略这个字段", async () => {
+		let state = await (await call("/api/saveService", { service: { name: "a", baseUrl: "https://a.test", latestPerFamily: true } })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		state = await (await call("/api/saveService", { service: { name: "b", baseUrl: "https://b.test" } })).json();
+		expect(state.services[1].latestPerFamily).toBe(false);
+
+		state = await (await call("/api/saveService", { previousName: "a", service: { name: "a", baseUrl: "https://a.test", latestPerFamily: false } })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		state = await (await call("/api/saveService", { previousName: "b", service: { name: "b", baseUrl: "https://b.test", latestPerFamily: true } })).json();
+		expect(state.services[1].latestPerFamily).toBe(false);
+		expect(JSON.parse(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).services.map((service: { latestPerFamily?: boolean }) => service.latestPerFamily)).toEqual([true, undefined]);
+	});
+
 	it("刷新失败时返回服务端原文", async () => {
 		vi.stubGlobal("fetch", async () => new Response('{"error":"Invalid token"}', { status: 401 }));
 		await call("/api/saveService", { service: { name: "relay", baseUrl: "https://relay.test" } });

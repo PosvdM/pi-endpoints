@@ -25,10 +25,17 @@ export function registerCommands(pi: ExtensionAPI, endpoints: Endpoints): void {
 				ctx.ui.notify(`管理页启动失败：${describeError(error)}`, "error");
 				return;
 			}
-			openBrowser(ui.url);
-			ctx.ui.notify(`管理页已打开：${ui.url}`, "info");
+			const url = pageUrl(ui.url, endpoints);
+			openBrowser(url);
+			ctx.ui.notify(`管理页已打开：${url}`, "info");
 		},
 	});
+}
+
+/** 有服务存在待处理的新版时，在网址后加 `service=<服务名>`（取第一个），页面打开时直接显示这个服务的模型。 */
+export function pageUrl(url: string, endpoints: Endpoints): string {
+	const service = endpoints.config.services.find((item) => endpoints.updates(item.name).length > 0);
+	return service ? `${url}&service=${encodeURIComponent(service.name)}` : url;
 }
 
 function openBrowser(url: string): void {
