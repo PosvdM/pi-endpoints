@@ -99,7 +99,7 @@ export function Drawer({ store, service, model, fallback, onClose }) {
 
 	/** 保存或清除成功后，按服务端保存的手动设置重建表单。 */
 	const resetForm = () => {
-		const saved = store.get().data.services.find((item) => item.name === service.name)?.models.find((item) => item.id === shown.id);
+		const saved = store.latest().data.services.find((item) => item.name === service.name)?.models.find((item) => item.id === shown.id);
 		const next = overrideToForm(saved?.override ?? {});
 		setForm(next);
 		setInitial(next);

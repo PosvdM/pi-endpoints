@@ -1,11 +1,16 @@
 // @ts-check
 // 页面和服务端之间的状态：最新的服务端状态、顶部错误、正在刷新的服务、提交中的开关和提示条。
 // 组件只读这里的快照，修改都经过这里的方法。
+//
+// store 里有两份快照。latest 是最新的：响应一到就按 X-Endpoints-Seq 采用其中的状态，错误和提示的编号也在这时分配；
+// 成功回调、导航和表单重填都读它（store.latest()）。published 是发布给组件重画的那份（store.get()），
+// 平时和 latest 相同；指针按下期间只推迟发布，松开后一次发布最新的快照，见 trackPointer()。
 
 /** @typedef {import("./util.js").State} State */
 /**
  * @typedef {{
  *   data: State;
+ *   loaded: boolean;
  *   error: { text: string; id: number } | null;
  *   okMark: number;
  *   refreshing: Set<string>;
@@ -16,6 +21,9 @@
  */
 /** @typedef {(snapshot: Snapshot) => Partial<Snapshot>} Updater */
 /** @typedef {{ okText?: string; pending?: [string, boolean] }} ActOptions */
+
+/** 指针按住超过这么久（毫秒）就不再推迟发布，免得漏掉松开事件时页面一直不更新。 */
+export const HOLD_LIMIT = 1000;
 
 /** 开关在 pending 里的键。 */
 export const pendingKey = {
@@ -32,7 +40,8 @@ export const pendingKey = {
  */
 export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.fetch(...args) }) {
 	/** @type {Snapshot} */
-	let snapshot = { data: { services: [], apis: [] }, error: null, okMark: 0, refreshing: new Set(), pending: new Map(), toast: null, update: null };
+	let latest = { data: { services: [], apis: [] }, loaded: false, error: null, okMark: 0, refreshing: new Set(), pending: new Map(), toast: null, update: null };
+	let published = latest;
 	/** @type {Set<() => void>} */
 	const listeners = new Set();
 	// 已采用的状态的编号（服务端的 X-Endpoints-Seq）。编号不大于它的状态是过期的，不采用。
@@ -42,29 +51,25 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	// 修改操作排队执行，前一个结束后才发下一个，页面上的操作按点击顺序生效。
 	/** @type {Promise<unknown>} */
 	let queue = Promise.resolve();
-	// 指针按下期间暂存的更新，松开后再采用，见 trackPointer()。
-	/** @type {Updater[] | null} */
-	let held = null;
-	// 正在刷新的服务。快照里的 refreshing 可能还在暂存，去重以这里为准。
-	/** @type {Set<string>} */
-	const inFlight = new Set();
+	// 排队中和执行中的修改操作涉及的服务，以及是否失败。刷新据此判断排在它前面的修改有没有失败，见 refresh()。
+	/** @type {Set<{ services: string[]; failed: boolean }>} */
+	const writes = new Set();
+	// 指针按下期间为 true，只推迟发布，见 trackPointer()。
+	let holding = false;
 
-	/** @param {Updater} updater */
-	function apply(updater) {
-		snapshot = { ...snapshot, ...updater(snapshot) };
+	function publish() {
+		if (published === latest) return;
+		published = latest;
+		for (const listener of listeners) listener();
 	}
 
 	/**
-	 * 更新快照并通知组件。更新写成函数，按当时的快照计算，暂存后再采用时也不会盖掉中间的变化。
+	 * 立即更新最新的快照，没按着指针时发布给组件。
 	 * @param {Updater} updater
 	 */
 	function update(updater) {
-		if (held) {
-			held.push(updater);
-			return;
-		}
-		apply(updater);
-		for (const listener of listeners) listener();
+		latest = { ...latest, ...updater(latest) };
+		if (!holding) publish();
 	}
 
 	/**
@@ -85,7 +90,7 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 
 	/**
 	 * 采用响应里的状态。并发的请求（刷新和修改操作）可能先发后到，按服务端生成状态时的编号丢掉过期的状态。
-	 * 没有编号的响应照常采用。编号在采用时比较，暂存期间到达的状态也按编号取舍。
+	 * 没有编号的响应照常采用。响应一到就比较，按住指针期间到达的状态也一样。
 	 * @param {any} result
 	 * @param {number} seq
 	 * @returns {Partial<Snapshot>}
@@ -107,6 +112,7 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	 * 排队执行一个修改操作。成功时采用返回的状态、清掉顶部错误并显示 okText；失败时把原因显示在顶部，返回 undefined。
 	 * `pending` 给出开关的键和要切换到的值，请求期间开关按这个值显示，结束后按服务端状态显示，失败时也就回到原样。
 	 * 每次提交都有自己的编号，同一个开关连续切换时，先结束的请求只清掉自己的记录，不影响后一次的显示。
+	 * 操作涉及的服务取自 body 的 name、previousName 和 service.name，记进 writes。
 	 * @param {string} path
 	 * @param {Record<string, unknown>} body
 	 * @param {ActOptions} [options]
@@ -125,6 +131,11 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 			pending.delete(pendingEntry[0]);
 			return { pending };
 		};
+		const entry = {
+			services: [body.name, body.previousName, /** @type {any} */ (body.service)?.name].filter((name) => typeof name === "string"),
+			failed: false,
+		};
+		writes.add(entry);
 		const run = async () => {
 			try {
 				const { result, seq } = await request(path, body);
@@ -137,8 +148,11 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 				}));
 				return result;
 			} catch (failure) {
+				entry.failed = true;
 				update((current) => ({ ...clearPending(current), error: errorOf(messageOf(failure)) }));
 				return undefined;
+			} finally {
+				writes.delete(entry);
 			}
 		};
 		const task = queue.then(run);
@@ -148,15 +162,16 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 
 	/**
 	 * 刷新服务目录。刷新会按磁盘上的配置执行“每系最新”，所以先等调用之前已经排队的修改操作都完成，
-	 * 免得越过还没提交的修改（例如刚关掉的开关）。刷新可能要等一分钟，本身不进队列，之后的修改操作不用等它；
-	 * 过期的状态由编号挡住。
+	 * 免得越过还没提交的修改（例如刚关掉的开关）。其中涉及这个服务的修改只要有一个失败，磁盘上的配置就不是用户要的，
+	 * 这次刷新取消，不发请求，顶部保留那个修改的错误；其他服务的修改失败不影响。
+	 * 刷新可能要等一分钟，本身不进队列，之后的修改操作不用等它；过期的状态由编号挡住。
 	 * 后台刷新（打开页面和重新启用服务时）的失败原因只记在服务状态里，不弹顶部提示；连不上管理页本身（如 pi 已退出）时也不打扰。
 	 * @param {string} name
 	 * @param {{ background?: boolean }} [options]
 	 */
 	async function refresh(name, { background = false } = {}) {
-		if (inFlight.has(name)) return undefined;
-		inFlight.add(name);
+		if (latest.refreshing.has(name)) return undefined;
+		const ahead = [...writes].filter((entry) => entry.services.includes(name));
 		update((current) => ({ refreshing: new Set(current.refreshing).add(name) }));
 		/** @type {Updater} */
 		const done = (current) => {
@@ -165,6 +180,10 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 			return { refreshing };
 		};
 		await queue;
+		if (ahead.some((entry) => entry.failed)) {
+			update(done);
+			return undefined;
+		}
 		try {
 			const { result, seq } = await request("refresh", { name });
 			update((current) => ({
@@ -179,24 +198,24 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 		} catch (failure) {
 			update((current) => ({ ...done(current), ...(background ? {} : { error: errorOf(messageOf(failure)) }) }));
 			return undefined;
-		} finally {
-			inFlight.delete(name);
 		}
 	}
 
 	return {
-		get: () => snapshot,
+		/** 发布给组件重画的快照，渲染时读它。 */
+		get: () => published,
+		/** 最新的快照，成功回调、导航和表单重填读它。 */
+		latest: () => latest,
 		/** @param {() => void} listener */
 		subscribe(listener) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		/** 读取初始状态，失败时抛出错误。 */
+		/** 读取初始状态，失败时抛出错误。和其他响应一样按编号采用，返回采用后最新的状态。 */
 		async load() {
 			const { result, seq } = await request("state");
-			const patch = accept(result, seq);
-			update(() => patch);
-			return patch.data ?? snapshot.data;
+			update(() => ({ ...accept(result, seq), loaded: true }));
+			return latest.data;
 		},
 		act,
 		refresh,
@@ -204,7 +223,7 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 		 * 开关正在提交的值，没有在提交时为 undefined。
 		 * @param {string} key
 		 */
-		pendingValue: (key) => snapshot.pending.get(key)?.value,
+		pendingValue: (key) => published.pending.get(key)?.value,
 		/**
 		 * 发一条测试消息，不改状态，也不进修改队列。
 		 * @param {Record<string, unknown>} body
@@ -222,33 +241,57 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 		/** 取一个新的时间标记，和错误编号、okMark 比较先后。 */
 		mark: () => ++ids,
 		/**
-		 * 指针按下期间暂存所有更新，松开后再采用。后台刷新可能增删或挪动列表行，按下时换掉了行，松开后的点击就落不到原来的元素上。
-		 * 松开后等这次点击处理完（下一个任务）再采用。暂存的更新按顺序采用，状态仍按编号取舍。返回取消监听的函数。
+		 * 指针按下期间推迟发布，松开后（等这次点击处理完，即下一个任务）发布最新的快照。后台刷新可能增删或挪动列表行，
+		 * 按下时换掉了行，松开后的点击就落不到原来的元素上。状态照常立即采用，推迟的只有组件重画。
+		 * 按 pointerId 跟踪按下的指针，全部松开才放行。下列情况也放行，免得漏掉松开事件时页面一直不更新：
+		 * pointercancel、lostpointercapture、窗口失去焦点、指针移动或进入页面时 buttons 为 0、按住超过 HOLD_LIMIT。
+		 * 返回取消监听的函数。
 		 * @param {Document} doc
 		 */
 		trackPointer(doc) {
-			const down = () => {
-				held ??= [];
+			/** @type {Set<number>} */
+			const active = new Set();
+			/** @type {ReturnType<typeof setTimeout> | undefined} */
+			let limit;
+			const release = () => {
+				clearTimeout(limit);
+				holding = false;
+				publish();
 			};
-			const up = () => {
-				setTimeout(() => {
-					const updaters = held;
-					held = null;
-					if (!updaters?.length) return;
-					for (const updater of updaters) apply(updater);
-					for (const listener of listeners) listener();
-				});
+			// 等这次点击处理完再放行；其间又按下了指针时不放行。
+			const releaseLater = () => setTimeout(() => {
+				if (!active.size) release();
+			});
+			/** @param {PointerEvent} event */
+			const down = (event) => {
+				active.add(event.pointerId);
+				if (holding) return;
+				holding = true;
+				limit = setTimeout(release, HOLD_LIMIT);
 			};
-			doc.addEventListener("pointerdown", down, true);
-			doc.addEventListener("pointerup", up, true);
-			doc.addEventListener("pointercancel", up, true);
-			// 在窗口外松开时可能收不到 pointerup，窗口失去焦点时同样放行。
-			doc.defaultView?.addEventListener("blur", up);
+			/** @param {PointerEvent} event */
+			const up = (event) => {
+				if (!active.delete(event.pointerId)) return;
+				if (!active.size) releaseLater();
+			};
+			/** @param {PointerEvent} event */
+			const move = (event) => {
+				if (event.buttons === 0) up(event);
+			};
+			const blur = () => {
+				active.clear();
+				releaseLater();
+			};
+			const win = doc.defaultView;
+			/** @type {[string, (event: any) => void][]} */
+			const handlers = [["pointerdown", down], ["pointerup", up], ["pointercancel", up], ["lostpointercapture", up], ["pointermove", move], ["pointerover", move]];
+			for (const [type, handler] of handlers) doc.addEventListener(type, handler, true);
+			win?.addEventListener("blur", blur);
 			return () => {
-				doc.defaultView?.removeEventListener("blur", up);
-				doc.removeEventListener("pointerdown", down, true);
-				doc.removeEventListener("pointerup", up, true);
-				doc.removeEventListener("pointercancel", up, true);
+				for (const [type, handler] of handlers) doc.removeEventListener(type, handler, true);
+				win?.removeEventListener("blur", blur);
+				clearTimeout(limit);
+				holding = false;
 			};
 		},
 	};
