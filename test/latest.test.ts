@@ -173,6 +173,30 @@ describe("每系最新", () => {
 		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.2-sol"]);
 	});
 
+	it("联网刷新的迁移写盘后，同一实例的管理页刷新读到新启用列表并只注册一次", async () => {
+		const { endpoints, catalogs, providers, registrations, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		catalogs["cpa.test"].ids = ["gpt-6.2-sol"];
+		await refreshModels();
+		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.1-sol"]);
+		const before = registrations();
+		expect(await endpoints.refreshForPage("cpa")).toBeUndefined();
+		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.2-sol"]);
+		expect(endpoints.status()[0].missing).toEqual([]);
+		expect(registrations()).toBe(before + 1);
+		expect(providers.get("cpa")?.models?.map((model) => model.id)).toEqual(["gpt-6.2-sol"]);
+	});
+
+	it("管理页刷新时文件读不了就拒绝，内存状态不变，也不请求目录", async () => {
+		const { endpoints, catalogs, registrations } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		catalogs["cpa.test"].ids = ["gpt-6.2-sol"];
+		writeFileSync(join(temp.dir, "endpoints-auth.json"), "{ broken");
+		const before = registrations();
+		await expect(endpoints.refreshForPage("cpa")).rejects.toThrow("endpoints-auth.json");
+		expect(endpoints.apiKey("cpa")).toBe("k");
+		expect(endpoints.catalog("cpa")?.models.map((model) => model.id)).toEqual(["gpt-6.1-sol"]);
+		expect(registrations()).toBe(before);
+	});
+
 	it("同一批刷新里，快的服务迁移不会取消慢的服务的联网刷新；两个服务的旧项都在 pi 设置里换掉", async () => {
 		let release: () => void = () => {};
 		const gate = new Promise<void>((resolve) => (release = resolve));
@@ -237,7 +261,7 @@ describe("每系最新", () => {
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 	});
 
-	it("没有变化时不写配置文件，也不把别的 pi 写入的配置换进内存", async () => {
+	it("没有变化时不写配置文件；pi 联网刷新不把别的 pi 写入的配置换进内存，管理页刷新会重新读取", async () => {
 		const { endpoints, refreshModels } = await setup(["gpt-6.2-sol", "Index-Translate-35B-A3B"], ["gpt-6.1-sol", "gpt-6.2-sol", "claude-opus-5-5"], { on: true });
 		// 另一个 pi 加了服务 b，并换成紧凑格式写入；保存过就会变回缩进格式。
 		const config = readConfig();
@@ -245,9 +269,10 @@ describe("每系最新", () => {
 		const compact = JSON.stringify(config);
 		writeFileSync(configFile(), compact);
 		await refreshModels();
+		expect(endpoints.service("b")).toBeUndefined();
 		await endpoints.refreshForPage("cpa");
 		expect(readFileSync(configFile(), "utf8")).toBe(compact);
-		expect(endpoints.service("b")).toBeUndefined();
+		expect(endpoints.service("b")).toBeDefined();
 	});
 
 	it("隐藏模型不算新版本", async () => {

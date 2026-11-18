@@ -295,11 +295,14 @@ export class Endpoints {
 	}
 
 	/**
-	 * 管理页的刷新：刷新目录，等 models.dev 更新完（最多 60 秒），目录刷新成功时再执行“每系最新”，立即生效。
+	 * 管理页的刷新：先像修改操作一样重新读取配置、密钥和缓存（文件读不了时抛错，内存不变），再刷新目录，
+	 * 等 models.dev 更新完（最多 60 秒），目录刷新成功时执行“每系最新”，立即生效。用户点刷新或打开页面是显式操作，
+	 * 可以在这里重新加载：pi 联网刷新时只写进磁盘的迁移，这时在本进程生效并显示在页面上。
 	 * 只注册最终结果：models.dev 数据变了（并由这里认领）或换了模型时全量注册，否则刷新成功时只注册这个服务。
 	 * 返回目录刷新失败的原因；models.dev 失败不算刷新失败。
 	 */
 	async refreshForPage(name: string): Promise<string | undefined> {
+		this.beginChange();
 		let refreshError: string | undefined;
 		try {
 			await this.refresh(name);
