@@ -144,6 +144,8 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 					defaultApi: input.defaultApi || undefined,
 					apiKeyEnv: input.apiKeyEnv?.trim() || undefined,
 					headers: input.headers && Object.keys(input.headers).length ? input.headers : undefined,
+					// 只在新建时生效，编辑已有服务时由 Endpoints.saveService() 沿用原值。不传时关闭。
+					latestPerFamily: input.latestPerFamily === true || undefined,
 				} as ServiceConfig,
 				previousName,
 			);
@@ -166,6 +168,11 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 		case "setLatestPerFamily":
 			await endpoints.setLatestPerFamily(str(body.name, "name"), body.latestPerFamily === true);
 			return undefined;
+		case "applyLatestOnce": {
+			// 按“每系最新”的规则只替换这一次，不改开关。
+			const replaced = await endpoints.applyLatestOnce(str(body.name, "name"));
+			return { ...state(endpoints), replaced };
+		}
 		case "setDefaultModel": {
 			const name = str(body.name, "name");
 			const id = str(body.id, "id");
@@ -274,6 +281,8 @@ function state(endpoints: Endpoints) {
 				apiKeyEnv: service.apiKeyEnv ?? "",
 				headers: service.headers ?? {},
 				latestPerFamily: service.latestPerFamily === true,
+				// 开关关着时，打开开关会发生的替换，只用于提示。
+				updates: endpoints.updates(service.name),
 				status: statuses.get(service.name),
 				catalog: catalog ? { fetchedAt: catalog.fetchedAt, codex: catalog.codex, size: catalog.models.length } : undefined,
 				models: endpoints.models(service.name).map((model) => modelView(model, service)),

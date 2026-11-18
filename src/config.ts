@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { Api, ModelCost, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Catalog } from "./catalog.ts";
+import type { Replacement } from "./family.ts";
 import type { ModelsDevFile } from "./modelsdev.ts";
 
 /** 单个模型的手动设置。没写的项按服务端目录、pi 自带目录、models.dev、默认值的顺序取。 */
@@ -66,6 +67,10 @@ export function cachePath(): string {
 
 export function modelsDevPath(): string {
 	return join(getAgentDir(), "endpoints-modelsdev.json");
+}
+
+export function statePath(): string {
+	return join(getAgentDir(), "endpoints-state.json");
 }
 
 function readJson<T>(path: string, fallback: T): T {
@@ -150,6 +155,36 @@ export function loadModelsDevFile(): unknown {
 export function saveModelsDevFile(file: ModelsDevFile, path = modelsDevPath()): void {
 	writeJson(path, file, { compact: true });
 }
+
+/** 插件自己记下的运行状态，丢了也只会多提示一次。 */
+export interface StateFile {
+	/** 按服务名记录已经在 pi 里提示过的新版（开关关着时）。 */
+	notifiedUpdates: Record<string, Replacement[]>;
+}
+
+/** 读状态文件。文件损坏或结构不对时按空处理，不合规的记录丢掉。 */
+export function loadState(): StateFile {
+	let raw: unknown;
+	try {
+		raw = readJson<unknown>(statePath(), {});
+	} catch {
+		return { notifiedUpdates: {} };
+	}
+	const notified = isRecord(raw) && isRecord(raw.notifiedUpdates) ? raw.notifiedUpdates : {};
+	const result: Record<string, Replacement[]> = {};
+	for (const [name, list] of Object.entries(notified)) {
+		if (!Array.isArray(list)) continue;
+		const valid = list.filter((item): item is Replacement => isRecord(item) && typeof item.from === "string" && typeof item.to === "string");
+		if (valid.length) result[name] = valid.map(({ from, to }) => ({ from, to }));
+	}
+	return { notifiedUpdates: result };
+}
+
+export function saveState(state: StateFile): void {
+	writeJson(statePath(), state);
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 export type KeySource = "env" | "file";
 

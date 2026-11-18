@@ -11,6 +11,7 @@ import {
 	loadAuth,
 	loadCache,
 	loadConfig,
+	loadState,
 	type ModelOverride,
 	normalizeService,
 	piApiKey,
@@ -18,6 +19,7 @@ import {
 	saveAuth,
 	saveCache,
 	saveConfig,
+	saveState,
 	type ServiceConfig,
 } from "./config.ts";
 import { replaceModels } from "./defaults.ts";
@@ -73,8 +75,11 @@ export class Endpoints {
 	private betas = new Map<string, Map<string, string[]>>();
 	/** 正在进行的 models.dev 更新，并发的调用共用它，拿到新数据后只全量注册一次。 */
 	private modelsDevTask?: ModelsDevTask;
-	/** “每系最新”换掉模型后，在 pi 的界面上提示一句。由插件入口设置，拿不到界面时为空。 */
-	notify?: (message: string) => void;
+	/**
+	 * 在 pi 的界面上提示一句：“每系最新”换掉了模型，或者开关关着的服务出了新版。由插件入口设置，
+	 * 返回提示是否真的显示了：子代理、`-p` 这类没有界面的运行会把提示丢掉。
+	 */
+	notify?: (message: string, level: "info" | "warning") => boolean;
 	private readonly pi: ExtensionAPI;
 
 	constructor(pi: ExtensionAPI) {
@@ -197,6 +202,7 @@ export class Endpoints {
 						void this.updateModelsDev();
 					}
 					await this.migrateOnDisk(name);
+					this.noticeUpdates(name);
 				}
 				const current = this.service(name);
 				return current ? this.piModels(name, this.enabledModels(current)) : [];
@@ -220,13 +226,29 @@ export class Endpoints {
 
 	/**
 	 * 在没停用、有密钥的服务里，有模型的上下文、最大输出、输入、思考或价格取自 models.dev 或默认值时，
-	 * 才需要 models.dev 的数据。开启了“每系最新”的服务也需要：自动迁移要靠它判断模型类型。
+	 * 才需要 models.dev 的数据。以下服务也需要，要靠它判断模型类型：
+	 * - 开启了“每系最新”的服务，自动迁移要用。
+	 * - 开关关着、但目录里可能有已启用模型的新版的服务（`mayHaveUpdates()`），新版提醒要用。
 	 */
 	needsModelsDev(): boolean {
 		return this.config.services.some(
 			(service) =>
-				!service.disabled && resolveKey(service, this.auth) && (service.latestPerFamily || this.models(service.name).some(usesFallback)),
+				!service.disabled &&
+				resolveKey(service, this.auth) &&
+				(service.latestPerFamily || this.mayHaveUpdates(service) || this.models(service.name).some(usesFallback)),
 		);
+	}
+
+	/**
+	 * 开关关着的服务在不看模型类型时能不能算出替换：候选只去掉隐藏模型，其余规则和前提同 `planLatest()`。
+	 * 能算出时才需要 models.dev 来排除非对话模型，目录里没有候选新版的服务不触发下载。
+	 */
+	private mayHaveUpdates(service: ServiceConfig): boolean {
+		if (service.latestPerFamily || service.disabled || service.enabled.length === 0) return false;
+		const catalog = latestCatalog(service, this.cache[service.name]);
+		if (!catalog) return false;
+		const candidates = catalog.models.filter((model) => !resolveModel(service, model, catalog).hidden).map((model) => model.id);
+		return pickLatest(service.enabled, candidates, catalog.models.map((model) => model.id)).replacements.length > 0;
 	}
 
 	/**
@@ -338,16 +360,18 @@ export class Endpoints {
 
 	/**
 	 * 按“每系最新”算出服务的新启用列表，没有变化或要推迟时返回 undefined。规则见 `pickLatest()`。
+	 * 开关关着时不计算，`force` 为真时不看开关（新版提醒和“只换一次”）。
 	 * - 目录缓存的来源地址未知（旧版本写的缓存）或和服务地址不同时跳过，目录可能属于旧地址。
-	 * - 本进程里还没有 models.dev 数据时推迟：要靠它判断候选是不是对话模型。开启了开关的服务算作需要 models.dev，
-	 *   所以会按原有的退避去下载。有数据、只是查不到的模型按对话模型处理，和注册一致。
+	 * - 本进程里还没有 models.dev 数据时推迟：要靠它判断候选是不是对话模型。开启了开关的服务、可能有新版的服务
+	 *   算作需要 models.dev，所以会按原有的退避去下载。有数据、只是查不到的模型按对话模型处理，和注册一致。
 	 */
-	private planLatest(service: ServiceConfig, catalog: Catalog | undefined): LatestResult | undefined {
-		if (!service.latestPerFamily || serviceProblem(service) || !catalog?.baseUrl || catalog.baseUrl !== service.baseUrl) return undefined;
-		if (!hasModelsDevData()) return undefined;
-		const models = catalog.models.map((model) => resolveModel(service, model, catalog));
+	private planLatest(service: ServiceConfig, catalog: Catalog | undefined, force = false): LatestResult | undefined {
+		if (!service.latestPerFamily && !force) return undefined;
+		const usable = latestCatalog(service, catalog);
+		if (!usable || !hasModelsDevData()) return undefined;
+		const models = usable.models.map((model) => resolveModel(service, model, usable));
 		const candidates = models.filter((model) => !model.hidden && isChatModel(model)).map((model) => model.id);
-		const result = pickLatest(service.enabled, candidates, catalog.models.map((model) => model.id));
+		const result = pickLatest(service.enabled, candidates, usable.models.map((model) => model.id));
 		return result.replacements.length ? result : undefined;
 	}
 
@@ -406,12 +430,72 @@ export class Endpoints {
 		} catch {
 			// 只跳过这一步。
 		}
-		const changes = replacements.map(({ from, to }) => `${from} → ${to}`).join("、");
+		const changes = describeReplacements(replacements);
 		const message = mode === "disk" ? `${name}：${changes} 已写入配置，新会话生效，当前 pi 用 /reload` : `${name}：${changes}。当前会话请用 /model 切换`;
+		this.tryNotify(message, "info");
+	}
+
+	/** 提示失败不影响结果，按没有显示处理。 */
+	private tryNotify(message: string, level: "info" | "warning"): boolean {
 		try {
-			this.notify?.(message);
+			return this.notify?.(message, level) === true;
 		} catch {
-			// 提示失败不影响结果。
+			return false;
+		}
+	}
+
+	/**
+	 * 开关关着时，如果现在打开开关会发生的替换，用内存里的配置和缓存计算，只用于提示。
+	 * 开关开着、服务停用或有问题、models.dev 没有数据、目录缓存不属于当前地址时为空。
+	 */
+	updates(name: string): Replacement[] {
+		const service = this.service(name);
+		return service ? this.pendingUpdates(service, this.cache[name]) : [];
+	}
+
+	private pendingUpdates(service: ServiceConfig, catalog: Catalog | undefined): Replacement[] {
+		if (service.latestPerFamily || service.disabled) return [];
+		return this.planLatest(service, catalog, true)?.replacements ?? [];
+	}
+
+	/**
+	 * pi 联网刷新目录成功后，开关关着的服务有新版时在 pi 里提示。每个“服务 + 旧 id → 新 id”只提示一次，
+	 * 提示确实显示了才记进 `endpoints-state.json`，没有界面时留到下次。顺手去掉已经不再待处理的记录。
+	 * 在重新读取的文件快照上计算，不改内存状态、不重新注册，也不等待任何东西。
+	 * 本进程还没有 models.dev 数据时推迟到下次刷新，记录也不动。
+	 */
+	private noticeUpdates(name: string): void {
+		if (!hasModelsDevData()) return;
+		let files: Files;
+		try {
+			files = readFiles();
+		} catch {
+			return;
+		}
+		const service = files.config.services.find((item) => item.name === name);
+		if (!service || service.latestPerFamily) return;
+		const updates = this.pendingUpdates(service, files.cache[name]);
+		const notified = loadState().notifiedUpdates[name] ?? [];
+		const seen = new Set(notified.map(replacementKey));
+		const fresh = updates.filter((item) => !seen.has(replacementKey(item)));
+		const shown =
+			fresh.length > 0 &&
+			this.tryNotify(
+				`${service.displayName || name} 有新版模型：${describeReplacements(fresh)}。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。`,
+				"warning",
+			);
+		const pending = new Set(updates.map(replacementKey));
+		const kept = notified.filter((item) => pending.has(replacementKey(item)));
+		if (!shown && kept.length === notified.length) return;
+		const next = shown ? [...kept, ...fresh] : kept;
+		try {
+			// 写之前重新读，只改这个服务的记录。多个 pi 之间不加锁，最坏是同一个新版多提示一次。
+			const state = loadState();
+			if (next.length) state.notifiedUpdates[name] = next;
+			else delete state.notifiedUpdates[name];
+			saveState(state);
+		} catch {
+			// 写不了时下次可能再提示一次。
 		}
 	}
 
@@ -450,7 +534,7 @@ export class Endpoints {
 		if (service.name !== previousName && this.service(service.name)) throw new Error(`已经有名为 ${service.name} 的服务`);
 
 		if (existing) {
-			// 编辑表单不带模型选择和服务开关，保留原来的。
+			// 编辑表单不带模型选择和服务开关，保留原来的。新建时按传入的 latestPerFamily 保存。
 			service.disabled = existing.disabled;
 			service.latestPerFamily = existing.latestPerFamily;
 			service.enabled = input.enabled ?? existing.enabled;
@@ -526,19 +610,44 @@ export class Endpoints {
 	 * 保存成功后才换进内存并注册，保存失败时内存不变。
 	 */
 	async setLatestPerFamily(name: string, on: boolean): Promise<void> {
+		await this.applyLatest(name, on);
+	}
+
+	/**
+	 * 按“每系最新”的规则把服务里已启用的旧版换成新版，只执行这一次，不改开关。用缓存的目录，不刷新。
+	 * 换了模型时和打开开关一样保存、全量注册、替换 pi 设置里的旧模型并提示。
+	 * 返回换掉的模型；没有可换的（包括 models.dev 拿不到数据、无法判断模型类型）时返回空数组，不写文件。
+	 */
+	async applyLatestOnce(name: string): Promise<Replacement[]> {
+		return this.applyLatest(name, undefined);
+	}
+
+	/**
+	 * `setLatestPerFamily()` 和 `applyLatestOnce()` 的共同部分。`on` 为 undefined 时不改开关，只替换一次；
+	 * `on` 为假时只关闭开关。先校验磁盘快照，要替换时等 models.dev 更新完（最多 60 秒）再读一次最新快照，在快照上改；
+	 * 开关和换过的启用列表一起保存，保存成功后才换进内存并注册（只注册一次），保存失败时内存不变。
+	 */
+	private async applyLatest(name: string, on: boolean | undefined): Promise<Replacement[]> {
+		const run = on !== false;
 		requireIn(this.readSnapshot(), name);
-		// 开关还没保存，needsModelsDev() 不会把这个服务算进去，所以不检查是否需要。认领留到真正注册时。
-		const claim = on ? await this.waitModelsDev(true) : undefined;
+		// 开关还没保存（或者不改开关），needsModelsDev() 不一定把这个服务算进去，所以不检查是否需要。认领留到真正注册时。
+		const claim = run ? await this.waitModelsDev(true) : undefined;
 		const files = this.readSnapshot();
 		const service = requireIn(files, name);
-		service.latestPerFamily = on || undefined;
-		const plan = this.planLatest(service, files.cache[name]);
+		if (on !== undefined) service.latestPerFamily = on || undefined;
+		const plan = run ? this.planLatest(service, files.cache[name], true) : undefined;
+		if (on === undefined && !plan) {
+			// 没有可换的模型时不写文件；models.dev 刚更新、还没人为它注册过时照样全量注册。
+			if (claim?.()) this.registerAll();
+			return [];
+		}
 		if (plan) service.enabled = plan.enabled;
 		saveConfig(files.config);
 		this.commit(files);
 		claim?.();
 		this.registerAll();
 		if (plan) await this.afterMigration(name, plan.replacements, "live");
+		return plan?.replacements ?? [];
 	}
 
 	setEnabled(name: string, id: string, enabled: boolean): void {
@@ -585,6 +694,19 @@ interface Files {
 function readFiles(): Files {
 	return { config: loadConfig(), auth: loadAuth(), cache: loadCache() };
 }
+
+/**
+ * “每系最新”可以用的目录：服务配置没有问题，缓存里目录的来源地址等于服务地址。
+ * 来源地址未知（旧版本写的缓存）或不同时，目录可能属于旧地址。
+ */
+function latestCatalog(service: ServiceConfig, catalog: Catalog | undefined): Catalog | undefined {
+	if (serviceProblem(service) || !catalog?.baseUrl || catalog.baseUrl !== service.baseUrl) return undefined;
+	return catalog;
+}
+
+const replacementKey = ({ from, to }: Replacement) => `${from}\n${to}`;
+
+const describeReplacements = (replacements: Replacement[]) => replacements.map(({ from, to }) => `${from} → ${to}`).join("、");
 
 /** 在文件快照里取服务，没有时报错。 */
 function requireIn(files: Files, name: string): ServiceConfig {
