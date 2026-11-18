@@ -14,6 +14,7 @@ import {
 	loadConfig,
 	loadState,
 	type ModelOverride,
+	type NotifiedUpdate,
 	normalizeService,
 	piApiKey,
 	resolveKey,
@@ -22,6 +23,7 @@ import {
 	saveConfig,
 	saveState,
 	type ServiceConfig,
+	type StateFile,
 } from "./config.ts";
 import { replaceModels } from "./defaults.ts";
 import { type LatestResult, mayReplace, pickLatest, type Replacement } from "./family.ts";
@@ -439,6 +441,8 @@ export class Endpoints {
 	 * `disk` 表示只改了文件，运行中的 pi 要 /reload；`live` 表示已经注册到当前 pi。
 	 */
 	private async afterMigration(name: string, replacements: Replacement[], mode: "disk" | "live"): Promise<void> {
+		// 旧版已经换掉，它的提醒记录不再需要。
+		forgetNotified(name, replacements.map(({ from }) => from));
 		try {
 			await replaceModels(name, new Map(replacements.map(({ from, to }) => [from, to])));
 		} catch {
@@ -475,50 +479,57 @@ export class Endpoints {
 
 	/**
 	 * pi 联网刷新目录成功后，开关关着的服务有新版时在 pi 里提示。同一个“服务 + 旧 id → 新 id”最多每
-	 * `RENOTIFY_MS`（7 天）提示一次，直到用户换掉旧版（替换不再待处理，记录随之去掉）或打开开关。
-	 * 提示确实显示了才记进 `endpoints-state.json`，没有能显示的界面时留到下次；即使某次提示被客户端静默丢掉，
-	 * 7 天后也会再提示。在重新读取的文件快照上计算，不改内存状态、不重新注册，也不等待任何东西。
-	 * 本进程还没有 models.dev 数据时推迟到下次刷新，记录也不动。
+	 * `RENOTIFY_MS`（7 天）提示一次，直到用户换掉旧版或打开开关。提示确实显示了才记进 `endpoints-state.json`，
+	 * 没有能显示的界面时留到下次；即使某次提示被客户端静默丢掉，7 天后也会再提示。
+	 * 记录只在两种情况下去掉：用户处理了旧版（见 `forgetNotified()` 的调用处），或者过了 7 天（这里顺带清理所有服务的）。
+	 * 暂时不在待处理列表里的记录不删：目录某次刷新漏掉了新版，下次又出现时不该再提示。
+	 * 在重新读取的文件快照上计算，不改内存状态、不重新注册，也不等待任何东西。
 	 */
 	private noticeUpdates(name: string): void {
-		if (!hasModelsDevData()) return;
+		const now = Date.now();
+		const shown = this.showUpdates(name, now);
+		editState((state) => {
+			let changed = false;
+			for (const [service, list] of Object.entries(state.notifiedUpdates)) {
+				const kept = list.filter((item) => isRecent(item, now));
+				if (kept.length === list.length) continue;
+				changed = true;
+				if (kept.length) state.notifiedUpdates[service] = kept;
+				else delete state.notifiedUpdates[service];
+			}
+			if (shown.length) {
+				const keys = new Set(shown.map(replacementKey));
+				const others = (state.notifiedUpdates[name] ?? []).filter((item) => !keys.has(replacementKey(item)));
+				state.notifiedUpdates[name] = [...others, ...shown.map(({ from, to }) => ({ from, to, at: now }))];
+				changed = true;
+			}
+			return changed;
+		});
+	}
+
+	/**
+	 * 提示这个服务到期的新版，返回确实显示了的替换。本进程还没有 models.dev 数据时推迟到下次刷新。
+	 * 开关开着的服务由 `migrateOnDisk()` 处理；快照里拿不到密钥（别的 pi 删了密钥）的服务不提醒，用户已经不再用它。
+	 */
+	private showUpdates(name: string, now: number): Replacement[] {
+		if (!hasModelsDevData()) return [];
 		let files: Files;
 		try {
 			files = readFiles();
 		} catch {
-			return;
+			return [];
 		}
 		const service = files.config.services.find((item) => item.name === name);
-		// 密钥被别的 pi 删掉的服务不提醒：用户已经不再用它。管理页的 updates 不看密钥。
-		if (!service || service.latestPerFamily || !resolveKey(service, files.auth)) return;
+		if (!service || service.latestPerFamily || !resolveKey(service, files.auth)) return [];
 		const updates = this.pendingUpdates(service, files.cache[name]);
-		const now = Date.now();
-		const notified = loadState().notifiedUpdates[name] ?? [];
-		const pending = new Set(updates.map(replacementKey));
-		// 已经不再待处理的记录去掉；间隔内提示过的不再提示。时钟回拨（at 晚于现在）时按已过间隔处理。
-		const kept = notified.filter((item) => pending.has(replacementKey(item)));
-		const recent = new Set(kept.filter((item) => now - item.at >= 0 && now - item.at < RENOTIFY_MS).map(replacementKey));
+		const recent = new Set((loadState().notifiedUpdates[name] ?? []).filter((item) => isRecent(item, now)).map(replacementKey));
 		const due = updates.filter((item) => !recent.has(replacementKey(item)));
-		const shown =
-			due.length > 0 &&
-			this.tryNotify(
-				`${service.displayName || name} 有新版模型：${describeReplacements(due)}。输入 /endpoints，在模型页点“换成新版”只换这一次，或点“开启自动替换”以后自动换。`,
-				"warning",
-			);
-		if (!shown && kept.length === notified.length) return;
-		const dueKeys = new Set(due.map(replacementKey));
-		const next = shown
-			? [...kept.filter((item) => !dueKeys.has(replacementKey(item))), ...due.map(({ from, to }) => ({ from, to, at: now }))]
-			: kept;
-		try {
-			// 写之前重新读，只改这个服务的记录。多个 pi 之间不加锁，最坏是同一个新版多提示一次。
-			const state = loadState();
-			if (next.length) state.notifiedUpdates[name] = next;
-			else delete state.notifiedUpdates[name];
-			saveState(state);
-		} catch {
-			// 写不了时下次可能再提示一次。
-		}
+		if (!due.length) return [];
+		const shown = this.tryNotify(
+			`${service.displayName || name} 有新版模型：${describeReplacements(due)}。输入 /endpoints，在模型页点“换成新版”只换这一次，或点“开启自动替换”以后自动换。`,
+			"warning",
+		);
+		return shown ? due : [];
 	}
 
 	private isCurrent(service: ServiceConfig): boolean {
@@ -560,7 +571,8 @@ export class Endpoints {
 			service.disabled = existing.disabled;
 			service.latestPerFamily = existing.latestPerFamily;
 			service.enabled = input.enabled ?? existing.enabled;
-			service.overrides = input.overrides ?? existing.overrides;
+			// 传了 overrides 时用 normalizeService() 整理过的（没有原型），没传时沿用原来的。
+			if (input.overrides == null) service.overrides = existing.overrides;
 			this.config.services[this.config.services.indexOf(existing)] = service;
 		} else {
 			this.config.services.push(service);
@@ -571,6 +583,7 @@ export class Endpoints {
 			const error = this.errors.get(previousName);
 			this.errors.delete(previousName);
 			if (error) this.errors.set(service.name, error);
+			renameNotified(previousName, service.name);
 		}
 		if (existing && existing.baseUrl !== service.baseUrl) {
 			// 换了地址，旧目录和旧错误都不再可信。
@@ -603,6 +616,7 @@ export class Endpoints {
 			saveCache(this.cache);
 		}
 		this.errors.delete(name);
+		forgetNotified(name);
 		this.registerAll();
 	}
 
@@ -683,6 +697,8 @@ export class Endpoints {
 		else set.delete(id);
 		service.enabled = [...set];
 		saveConfig(this.config);
+		// 停用了旧版，用户已经处理过它的新版提醒。
+		if (!enabled) forgetNotified(name, [id]);
 		this.registerAll();
 	}
 
@@ -727,6 +743,47 @@ function latestCatalog(service: ServiceConfig, catalog: Catalog | undefined): Ca
 }
 
 const replacementKey = ({ from, to }: Replacement) => `${from}\n${to}`;
+
+/** 提示时间在 `RENOTIFY_MS` 以内。时钟回拨（提示时间晚于现在）时按已过间隔处理。 */
+const isRecent = (item: NotifiedUpdate, now: number) => now - item.at >= 0 && now - item.at < RENOTIFY_MS;
+
+/**
+ * 改 `endpoints-state.json`：重新读取，`edit` 返回真时写回。多个 pi 之间不加锁；读写失败时忽略，
+ * 最坏是同一个新版多提示一次。
+ */
+function editState(edit: (state: StateFile) => boolean): void {
+	try {
+		const state = loadState();
+		if (edit(state)) saveState(state);
+	} catch {
+		// 见上。
+	}
+}
+
+/** 用户处理了新版（换掉或停用旧版、删除服务）后去掉提醒记录：给了 `froms` 时只去掉这些旧 id 的，否则去掉整个服务的。 */
+function forgetNotified(name: string, froms?: readonly string[]): void {
+	editState((state) => {
+		const list = state.notifiedUpdates[name];
+		if (!list) return false;
+		const kept = froms ? list.filter((item) => !froms.includes(item.from)) : [];
+		if (kept.length === list.length) return false;
+		if (kept.length) state.notifiedUpdates[name] = kept;
+		else delete state.notifiedUpdates[name];
+		return true;
+	});
+}
+
+/** 服务改名时把提醒记录搬到新名下；旧名没有记录时新名下也不留。 */
+function renameNotified(from: string, to: string): void {
+	editState((state) => {
+		const list = state.notifiedUpdates[from];
+		if (!list && !state.notifiedUpdates[to]) return false;
+		delete state.notifiedUpdates[from];
+		if (list) state.notifiedUpdates[to] = list;
+		else delete state.notifiedUpdates[to];
+		return true;
+	});
+}
 
 const describeReplacements = (replacements: Replacement[]) => replacements.map(({ from, to }) => `${from} → ${to}`).join("、");
 

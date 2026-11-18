@@ -584,13 +584,13 @@ describe("新版提醒", () => {
 		expect(notes).toHaveLength(1);
 		expect(otherNotes).toEqual([]);
 
-		// 出了 6.3，待处理的替换变成 6.1 → 6.3，提示一次，旧记录去掉。
+		// 出了 6.3，待处理的替换变成 6.1 → 6.3，提示一次。6.1 → 6.2 的记录留到过期或用户处理掉 6.1。
 		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-sol"];
 		await refreshModels();
 		expect(notes.map(([message]) => message)[1]).toContain("gpt-6.1-sol → gpt-6.3-sol");
-		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.3-sol", at: expect.any(Number) }]);
+		expect(readState().notifiedUpdates.cpa.map(({ to }: { to: string }) => to)).toEqual(["gpt-6.2-sol", "gpt-6.3-sol"]);
 
-		// 用户自己换成新版后没有待处理的替换，记录清掉。
+		// 用户自己停用旧版后，6.1 的记录都清掉。
 		endpoints.setEnabled("cpa", "gpt-6.1-sol", false);
 		endpoints.setEnabled("cpa", "gpt-6.3-sol", true);
 		await refreshModels();
@@ -598,7 +598,7 @@ describe("新版提醒", () => {
 		expect(readState()).toEqual({ notifiedUpdates: {} });
 	});
 
-	it("同一个替换最多每 7 天提示一次：7 天内不重复，7 天后再提示，换掉旧版后清除记录", async () => {
+	it("同一个替换最多每 7 天提示一次：7 天内不重复，7 天后再提示，停用旧版后清除记录", async () => {
 		const day = 24 * 60 * 60 * 1000;
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -619,17 +619,87 @@ describe("新版提醒", () => {
 		expect(notes).toHaveLength(2);
 		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: now }]);
 
-		// 7 天后那次没有界面：不显示，也不更新时间，下次有界面时再提示。
+		// 又过 7 天那次没有界面：不显示，过期的记录清掉，也不记新的；下次有界面时再提示。
 		now += 7 * day;
 		listen(endpoints, false);
 		await refreshModels();
-		expect(readState().notifiedUpdates.cpa[0].at).toBe(first + 7 * day);
+		expect(readState()).toEqual({ notifiedUpdates: {} });
+		const later = listen(endpoints);
+		await refreshModels();
+		expect(later).toHaveLength(1);
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: now }]);
 
-		// 用户换成新版后不再待处理，记录清除。
+		// 用户换成新版后，记录清除。
 		endpoints.setEnabled("cpa", "gpt-6.1-sol", false);
 		endpoints.setEnabled("cpa", "gpt-6.2-sol", true);
 		await refreshModels();
 		expect(readState()).toEqual({ notifiedUpdates: {} });
+	});
+
+	it("目录某次刷新暂时漏掉新版时，记录不删，新版回来后 7 天内不再提示；过期的记录（包括别的服务的）刷新时清掉", async () => {
+		const day = 24 * 60 * 60 * 1000;
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		await refreshModels();
+		expect(notes).toHaveLength(1);
+		const first = now;
+
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol"];
+		now += day;
+		await refreshModels();
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: first }]);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		now += day;
+		await refreshModels();
+		expect(notes).toHaveLength(1);
+
+		// 已经删掉的服务留下的记录，过了 7 天由下一次刷新清掉。
+		const state = readState();
+		state.notifiedUpdates.gone = [{ from: "a-1", to: "a-2", at: now - 7 * day }];
+		state.notifiedUpdates.fresh = [{ from: "a-1", to: "a-2", at: now - 1 }];
+		writeFileSync(stateFile(), JSON.stringify(state));
+		await refreshModels();
+		expect(Object.keys(readState().notifiedUpdates)).toEqual(["cpa", "fresh"]);
+	});
+
+	it("只换一次、打开开关并换了模型、停用旧版、删除服务时清掉对应的记录，改名时搬到新名下", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol", "claude-opus-5-5"], ["gpt-6.1-sol", "claude-opus-5-5"]);
+		listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol", "claude-opus-5-5", "claude-opus-5-6"];
+		await refreshModels();
+		const records = () => readState().notifiedUpdates;
+		const other = { from: "x-1", to: "x-2", at: Date.now() };
+		const withOther = () => writeFileSync(stateFile(), JSON.stringify({ notifiedUpdates: { ...records(), other: [other] } }));
+		withOther();
+		expect(records().cpa.map(({ from }: { from: string }) => from)).toEqual(["gpt-6.1-sol", "claude-opus-5-5"]);
+
+		// 停用旧版只清它自己的记录。
+		endpoints.setEnabled("cpa", "claude-opus-5-5", false);
+		expect(records().cpa.map(({ from }: { from: string }) => from)).toEqual(["gpt-6.1-sol"]);
+		// 只换一次：换掉的旧版的记录清掉。
+		expect(await endpoints.applyLatestOnce("cpa")).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+		expect(records()).toEqual({ other: [other] });
+
+		// 打开开关并换了模型。
+		endpoints.setEnabled("cpa", "gpt-6.1-sol", true);
+		await refreshModels();
+		expect(records().cpa).toHaveLength(1);
+		await endpoints.setLatestPerFamily("cpa", true);
+		expect(records()).toEqual({ other: [other] });
+
+		// 改名时搬到新名下，删除服务时清掉。
+		await endpoints.setLatestPerFamily("cpa", false);
+		endpoints.setEnabled("cpa", "gpt-6.1-sol", true);
+		await refreshModels();
+		expect(records().cpa).toHaveLength(1);
+		endpoints.saveService({ name: "cpa2", baseUrl: "https://cpa.test" } as never, "cpa");
+		expect(records().cpa).toBeUndefined();
+		expect(records().cpa2).toHaveLength(1);
+		endpoints.removeService("cpa2");
+		expect(records()).toEqual({ other: [other] });
 	});
 
 	it("没有时间的旧记录按已到期处理，再提示一次并补上时间", async () => {

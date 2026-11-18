@@ -6,7 +6,7 @@ import { browserCommand, pageUrl } from "../src/commands.ts";
 import { Endpoints } from "../src/endpoints.ts";
 import piEndpoints from "../src/index.ts";
 import { setModelsDevForTest } from "../src/modelsdev.ts";
-import { resetContextsForTest } from "../src/notify.ts";
+import { contextCountForTest, resetContextsForTest } from "../src/notify.ts";
 import { fakePi, useTempAgentDir } from "./helpers.ts";
 
 let temp: ReturnType<typeof useTempAgentDir>;
@@ -83,25 +83,95 @@ describe("插件入口的提示", () => {
 		expect(existsSync(stateFile())).toBe(false);
 	});
 
-	it("同一进程里后加载的后台会话接管刷新时，提示仍显示在有界面的会话里；那个会话结束后不再记录", async () => {
-		// 模仿 pi-web-ui：主会话和子代理各加载一份插件，共用一个模型运行时，后注册的接管 refreshModels。
-		const main = load();
-		const shown = vi.fn();
-		main.emit("session_start", { hasUI: true, mode: "rpc", ui: { headless: false, notify: shown } });
-		const sub = load();
-		const dropped = vi.fn();
-		sub.emit("session_start", { hasUI: true, mode: "rpc", ui: { headless: true, notify: dropped } });
-		await sub.refresh();
-		expect(dropped).not.toHaveBeenCalled();
-		expect(shown).toHaveBeenCalledWith(expect.stringContaining("gpt-6.1-sol → gpt-6.2-sol"), "warning");
-		expect(existsSync(stateFile())).toBe(true);
+	/** 模仿 pi 给扩展的 ctx：`runtime` 是会话共用的 ModelRuntime，pi 放在 `ctx.modelRegistry.runtime` 上。 */
+	function ctxOf(runtime: object | undefined, headless: boolean, notify = vi.fn()) {
+		return { hasUI: true, mode: "rpc", ui: { headless, notify }, modelRegistry: runtime && { runtime } };
+	}
+	const records = () => JSON.parse(readFileSync(stateFile(), "utf8")).notifiedUpdates.cpa;
 
-		main.emit("session_shutdown", {});
+	it("同一客户端里后加载的后台会话接管刷新时，提示显示在同一客户端的界面上；那个界面结束后不提示也不记录", async () => {
+		// 模仿 pi-web-ui：主会话和子代理各加载一份插件，共用一个 ModelRuntime，后注册的接管 refreshModels。
+		const runtime = {};
+		const main = load();
+		const shown = ctxOf(runtime, false);
+		main.emit("session_start", shown);
+		const sub = load();
+		const dropped = ctxOf(runtime, true);
+		sub.emit("session_start", dropped);
+		await sub.refresh();
+		expect(dropped.ui.notify).not.toHaveBeenCalled();
+		expect(shown.ui.notify).toHaveBeenCalledWith(expect.stringContaining("gpt-6.1-sol → gpt-6.2-sol"), "warning");
+		expect(records()).toHaveLength(1);
+
+		// 子代理结束后，它注册的 refreshModels 仍可能被共用的 ModelRuntime 调用，照样找同一客户端的界面。
+		sub.emit("session_shutdown", {});
 		ids = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-sol"];
 		await sub.refresh();
-		// 6.1 → 6.3 没有显示，不记录；6.1 → 6.2 已经不待处理，记录去掉。
-		expect(shown).toHaveBeenCalledTimes(1);
-		expect(JSON.parse(readFileSync(stateFile(), "utf8")).notifiedUpdates.cpa).toBeUndefined();
+		expect(shown.ui.notify).toHaveBeenCalledTimes(2);
+
+		main.emit("session_shutdown", {});
+		ids = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-sol", "gpt-6.4-sol"];
+		await sub.refresh();
+		expect(shown.ui.notify).toHaveBeenCalledTimes(2);
+		expect(records().map(({ to }: { to: string }) => to)).toEqual(["gpt-6.2-sol", "gpt-6.3-sol"]);
+	});
+
+	it("两个独立的客户端各用自己的界面：后台会话接管刷新时不投给别的客户端；自己能显示时用自己的", async () => {
+		const clientA = {};
+		const clientB = {};
+		const mainA = load();
+		const shownA = ctxOf(clientA, false);
+		mainA.emit("session_start", shownA);
+		// B 启动得更晚，是进程里最近一个能显示的会话。
+		const mainB = load();
+		const shownB = ctxOf(clientB, false);
+		mainB.emit("session_start", shownB);
+		const subA = load();
+		subA.emit("session_start", ctxOf(clientA, true));
+
+		await subA.refresh();
+		expect(shownB.ui.notify).not.toHaveBeenCalled();
+		expect(shownA.ui.notify).toHaveBeenCalledTimes(1);
+
+		// A 的界面关掉后，A 的后台会话找不到同一客户端的界面，不投给 B，也不记录。
+		ids = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-sol"];
+		mainA.emit("session_shutdown", {});
+		await subA.refresh();
+		expect(shownB.ui.notify).not.toHaveBeenCalled();
+		expect(records().map(({ to }: { to: string }) => to)).toEqual(["gpt-6.2-sol"]);
+
+		// A 自己（较早启动）刷新时用自己的界面，不用最近的 B。
+		const ownA = load();
+		const ownShown = ctxOf(clientA, false);
+		ownA.emit("session_start", ownShown);
+		mainB.emit("session_start", shownB);
+		await ownA.refresh();
+		expect(ownShown.ui.notify).toHaveBeenCalledTimes(1);
+		expect(shownB.ui.notify).not.toHaveBeenCalled();
+	});
+
+	it("读不到 ModelRuntime 时退回到进程里最近一个能显示的会话；没收到过 session_start 的实例不提示", async () => {
+		const main = load();
+		const shown = ctxOf(undefined, false);
+		main.emit("session_start", shown);
+		const fresh = load();
+		await fresh.refresh();
+		expect(shown.ui.notify).not.toHaveBeenCalled();
+		expect(existsSync(stateFile())).toBe(false);
+
+		const sub = load();
+		sub.emit("session_start", ctxOf(undefined, true));
+		await sub.refresh();
+		expect(shown.ui.notify).toHaveBeenCalledTimes(1);
+	});
+
+	it("注册和投递时清扫整组失效的上下文", async () => {
+		const stale = [ctxOf({}, false), ctxOf({}, false)];
+		for (const ctx of stale) load().emit("session_start", ctx);
+		expect(contextCountForTest()).toBe(2);
+		for (const ctx of stale) Object.defineProperty(ctx, "hasUI", { get: () => { throw new Error("stale"); } });
+		load().emit("session_start", ctxOf({}, false));
+		expect(contextCountForTest()).toBe(1);
 	});
 
 	it("已经失效的会话上下文访问时抛错，跳过它，按没有界面处理", async () => {

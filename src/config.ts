@@ -102,7 +102,8 @@ export function normalizeService(service: Partial<ServiceConfig>): ServiceConfig
 		disabled: service.disabled === true ? true : undefined,
 		latestPerFamily: service.latestPerFamily === true ? true : undefined,
 		enabled: Array.isArray(service.enabled) ? service.enabled.filter((id) => typeof id === "string") : [],
-		overrides: service.overrides && typeof service.overrides === "object" ? service.overrides : {},
+		// 按模型 id 取值，id 来自服务端目录，同样不能读到继承的属性。
+		overrides: dict(service.overrides && typeof service.overrides === "object" ? service.overrides : {}),
 	};
 }
 
@@ -133,8 +134,8 @@ export function loadCache(): CacheFile {
 	try {
 		return dict(readJson<CacheFile>(cachePath(), {}));
 	} catch {
-		// 缓存坏了就当没有，下次刷新会重写。
-		return {};
+		// 缓存坏了就当没有，下次刷新会重写。同样不带原型，服务名 constructor 读不到继承的属性。
+		return dict({});
 	}
 }
 
