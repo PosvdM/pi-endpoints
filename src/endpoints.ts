@@ -352,8 +352,8 @@ export class Endpoints {
 	 * 别的服务的配置也可能换了，它们的 `refreshModels` 会按内存里的新配置发布，注册必须跟内存一致。
 	 * 进入注册时认领共享的 models.dev 下载。下载任务有后台调用方时它会先注册一次，这里还会再注册；纯管理页刷新时任务不注册。
 	 * 返回目录刷新失败的原因；models.dev 失败不算刷新失败。
-	 * `migrate` 为假时只刷新目录和全量注册，不执行“每系最新”，即使磁盘上的开关开着：页面发出刷新时显示的开关是关的，
-	 * 不能违背用户看到的开关去换模型。
+	 * `migrate` 为假时只刷新目录和全量注册，不执行“每系最新”，即使磁盘上的开关开着：页面拿不准用户是不是要开着
+	 * （例如开关刚被关掉、写入失败）时传 false，拿不准就不换模型。
 	 */
 	async refreshForPage(name: string, options: { migrate?: boolean } = {}): Promise<string | undefined> {
 		this.beginChange();

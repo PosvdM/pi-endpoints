@@ -230,7 +230,7 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 			endpoints.setKey(str(body.name, "name"), str(body.apiKey, "apiKey"));
 			return undefined;
 		case "refresh": {
-			// 页面发出刷新时显示的“每系最新”开关（含还没提交的值）。为 false 时这次不替换，即使磁盘上开着；不传时按磁盘上的开关。
+			// 页面按保守规则算出的“每系最新”开关值，拿不准用户意图时为 false。为 false 时这次不替换，即使磁盘上开着；不传时按磁盘上的开关。
 			const latest = body.latestPerFamily;
 			if (latest !== undefined && typeof latest !== "boolean") throw new HttpError(400, "latestPerFamily 必须是布尔值");
 			return refreshService(endpoints, str(body.name, "name"), latest !== false);
