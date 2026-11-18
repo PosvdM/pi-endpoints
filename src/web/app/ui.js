@@ -76,7 +76,7 @@ export function Star({ store, service, model }) {
  */
 export function EnableSwitch({ store, service, model, class: extra = "", onChanged }) {
 	const key = pendingKey.enabled(service.name, model.id);
-	const pending = store.get().pending.get(key);
+	const pending = store.pendingValue(key);
 	const enabled = pending ?? model.enabled;
 	const type = nonChat(model);
 	const className = `switch${extra ? ` ${extra}` : ""}`;

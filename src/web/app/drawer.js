@@ -64,12 +64,14 @@ export function Drawer({ store, service, model, fallback, onClose }) {
 	const [form, setForm] = useState(() => overrideToForm(shown.override));
 	// 打开时（以及保存或清除之后）表单的值，关闭面板时和当前的值比较。测试消息的档位不算修改。
 	const [initial, setInitial] = useState(form);
-	const [formError, setFormError] = useState(/** @type {string | null} */ (null));
-	const [test, setTest] = useState(/** @type {{ ok: boolean; text: string } | null} */ (null));
+	// 提示区里面板自己的内容：表单的校验错误或测试结果，mark 是出现的时刻（store.mark()）。
+	const [note, setNote] = useState(/** @type {{ kind: "error" | "ok" | "fail"; text: string; mark: number } | null} */ (null));
 	const [testing, setTesting] = useState(false);
 	const [testLevel, setTestLevel] = useState("");
 	// 打开面板之后出现的顶部错误也显示在面板里：面板盖住了页面顶部的错误提示。
-	const openedAt = useRef(store.errorMark());
+	const openedAt = useRef(store.mark());
+	// 最后一次在提示区里显示过的顶部错误的编号。错误出现后，比它早的测试结果不再显示。
+	const shownError = useRef(0);
 	const mounted = useRef(true);
 	useEffect(() => () => {
 		mounted.current = false;
@@ -113,42 +115,48 @@ export function Drawer({ store, service, model, fallback, onClose }) {
 		try {
 			override = formToOverride(form);
 		} catch (failure) {
-			setFormError(failure instanceof Error ? failure.message : String(failure));
+			setNote({ kind: "error", text: failure instanceof Error ? failure.message : String(failure), mark: store.mark() });
 			return;
 		}
-		setFormError(null);
 		submit(override, "手动设置已保存");
 	};
-	const clear = () => {
-		setFormError(null);
-		submit(undefined, "已清除手动设置");
-	};
+	const clear = () => submit(undefined, "已清除手动设置");
 
-	// 测试消息的思考档位，默认不设置。模型不支持调节思考时不显示。
+	// 测试消息的思考档位，默认不设置。模型不支持调节思考时不显示。选中的档位按最新的 levels 校验：
+	// 手动设置改掉了这个档位后按“不设置”显示和发送，下拉框显示的和请求里的一致。
 	const testLevels = shown.levels.filter((level) => level !== "off");
+	const level = testLevels.includes(testLevel) ? testLevel : "";
 	const sendTest = async () => {
 		setTesting(true);
-		/** @type {{ ok: boolean; text: string }} */
+		/** @type {{ kind: "ok" | "fail"; text: string }} */
 		let next;
 		try {
-			const result = await store.test({ name: service.name, id: shown.id, ...(testLevel ? { thinkingLevel: testLevel } : {}) });
-			const level = result.request.thinkingLevel ? ` · 思考档位 ${result.request.thinkingLevel}` : "";
+			const result = await store.test({ name: service.name, id: shown.id, ...(level ? { thinkingLevel: level } : {}) });
+			const sent = result.request.thinkingLevel ? ` · 思考档位 ${result.request.thinkingLevel}` : "";
 			next = {
-				ok: result.ok,
-				text: `${result.ok ? "成功" : "失败"} · ${result.request.api} ${result.request.baseUrl}${level} · ${(result.durationMs / 1000).toFixed(1)} 秒 · stopReason: ${result.stopReason}\n`
+				kind: result.ok ? "ok" : "fail",
+				text: `${result.ok ? "成功" : "失败"} · ${result.request.api} ${result.request.baseUrl}${sent} · ${(result.durationMs / 1000).toFixed(1)} 秒 · stopReason: ${result.stopReason}\n`
 					+ (result.ok ? `回复：${result.text}` : result.error || "没有返回错误信息"),
 			};
 		} catch (failure) {
-			next = { ok: false, text: failure instanceof Error ? failure.message : String(failure) };
+			next = { kind: "fail", text: failure instanceof Error ? failure.message : String(failure) };
 		}
 		// 面板已经关了或换了模型时丢掉结果，结果只属于发出时的模型。
 		if (!mounted.current) return;
-		setTest(next);
+		setNote({ ...next, mark: store.mark() });
 		setTesting(false);
 	};
 
-	const error = store.get().error;
-	const message = formError ?? (error && error.id > openedAt.current ? error.text : null);
+	// 提示区只有一份内容，后出现的盖住先出现的：校验错误、打开面板后出现的顶部错误和测试结果谁新显示谁。
+	// 操作成功（okMark）后清掉比它早的校验错误，顶部错误由 store 清掉；测试结果保留，但被错误盖住过的不再显示。
+	const { error, okMark } = store.get();
+	const topError = error && error.id > openedAt.current ? error : null;
+	if (topError) shownError.current = Math.max(shownError.current, topError.id);
+	/** @type {{ kind: "error" | "ok" | "fail"; text: string } | null} */
+	let message = null;
+	if (topError && topError.id > (note?.mark ?? 0)) message = { kind: "error", text: topError.text };
+	else if (note?.kind === "error") message = note.mark > okMark ? note : null;
+	else if (note && note.mark > shownError.current) message = note;
 	const type = nonChat(shown);
 	const o = shown.override;
 	/** @param {keyof typeof form} key */
@@ -196,15 +204,15 @@ export function Drawer({ store, service, model, fallback, onClose }) {
 					${field("价格", html`<textarea class="input" placeholder='每百万 token 的美元价格，例如 {"input": 2, "output": 10}' ...${bind("cost")}></textarea>`)}
 				</div>
 			</div>
-			<div class="drawer-msg">${message
-				? html`<div class="banner err">${message}</div>`
-				: test ? html`<div class=${`result ${test.ok ? "ok" : "err"}`}>${test.text}</div>` : null}</div>
+			<div class="drawer-msg">${message?.kind === "error"
+				? html`<div class="banner err">${message.text}</div>`
+				: message ? html`<div class=${`result ${message.kind === "ok" ? "ok" : "err"}`}>${message.text}</div>` : null}</div>
 			<div class="drawer-foot">
 				<button class="btn primary" onClick=${save}>保存</button>
 				<button class="btn" disabled=${!Object.keys(o).length} onClick=${clear}>清除手动设置</button>
 				<span class="spacer"></span>
 				${testLevels.length
-					? html`<select class="input" title="测试消息的思考档位" value=${testLevel} onChange=${(/** @type {Event} */ event) => setTestLevel(/** @type {HTMLSelectElement} */ (event.currentTarget).value)}>
+					? html`<select class="input" title="测试消息的思考档位" value=${level} onChange=${(/** @type {Event} */ event) => setTestLevel(/** @type {HTMLSelectElement} */ (event.currentTarget).value)}>
 						<option value="">不设置</option>${testLevels.map((level) => html`<option value=${level}>${level}</option>`)}</select>`
 					: null}
 				<button class="btn" disabled=${testing} onClick=${sendTest}>${testing ? "测试中…" : "发送测试消息"}</button>

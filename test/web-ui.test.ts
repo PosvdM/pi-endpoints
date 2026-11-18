@@ -1,6 +1,5 @@
 // @vitest-environment happy-dom
 // 管理页前端（src/web/app/）的 DOM 测试。用假的 fetch 代替服务端，按接口约定返回状态和 X-Endpoints-Seq。
-import { render } from "preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startApp } from "../src/web/app/app.js";
 import { parseCount, prefixOf, versionOf } from "../src/web/app/util.js";
@@ -102,6 +101,7 @@ async function settle() {
 }
 
 let root: HTMLElement;
+let stop: (() => void) | undefined;
 
 beforeEach(() => {
 	document.body.innerHTML = '<div id="root"></div>';
@@ -110,16 +110,18 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	// 卸载页面，详情面板挂在 document 上的 Esc 监听随之移除。
-	render(null, root);
+	// 卸载页面，挂在 document 上的 Esc 和指针监听随之移除。
+	stop?.();
+	stop = undefined;
 	vi.unstubAllGlobals();
 	document.body.innerHTML = "";
 });
 
 async function open(server: ReturnType<typeof fakeServer>, search = "") {
-	const store = startApp(root, { token: "t", search, fetch: server.fetch as unknown as typeof fetch });
+	const app = startApp(root, { token: "t", search, fetch: server.fetch as unknown as typeof fetch });
+	stop = app.stop;
 	await settle();
-	return store;
+	return app.store;
 }
 
 const $ = <T extends Element = HTMLElement>(selector: string) => root.ownerDocument.querySelector(selector) as T | null;
@@ -502,6 +504,9 @@ describe("添加服务", () => {
 		const key = $$(".form input")[3] as HTMLInputElement;
 		expect(key.type).toBe("password");
 		expect(key.getAttribute("autocomplete")).toBe("one-time-code");
+		expect(key.hasAttribute("data-1p-ignore")).toBe(true);
+		expect(key.hasAttribute("data-bwignore")).toBe(true);
+		expect(key.getAttribute("data-lpignore")).toBe("true");
 		await type($$(".form input")[1], "relay");
 		await type(key, "sk-1");
 		server.handlers.saveService = () => ({ status: 400, error: "地址不对" });
@@ -521,6 +526,31 @@ describe("详情面板", () => {
 		expect(star.getAttribute("aria-disabled")).toBe("true");
 		expect(star.hasAttribute("disabled")).toBe(false);
 		star.click();
+		await settle();
+		expect($(".drawer")).not.toBeNull();
+	});
+
+	it("点不了的启用开关（非对话模型）不勾选，也打开详情", async () => {
+		const server = fakeServer(state([service("relay", [model("jev-1", { modelType: "decision" })])]));
+		await open(server);
+		const toggleInput = rowOf("jev-1").querySelector(".switch") as HTMLInputElement;
+		expect(toggleInput.getAttribute("aria-disabled")).toBe("true");
+		expect(toggleInput.hasAttribute("disabled")).toBe(false);
+		toggleInput.click();
+		await settle();
+		expect(toggleInput.checked).toBe(false);
+		expect($(".drawer .model-id")?.textContent).toBe("jev-1");
+		expect(server.posts().some((call) => call.path === "setEnabled")).toBe(false);
+	});
+
+	it("输入法选字时（keyCode 229）的 Esc 不关闭面板", async () => {
+		const server = fakeServer(state([service("relay", [model("a-1")])]));
+		await open(server);
+		rowOf("a-1").click();
+		await settle();
+		const event = new KeyboardEvent("keydown", { key: "Escape" });
+		Object.defineProperty(event, "keyCode", { value: 229 });
+		document.dispatchEvent(event);
 		await settle();
 		expect($(".drawer")).not.toBeNull();
 	});
@@ -598,6 +628,263 @@ describe("详情面板", () => {
 		await settle();
 		expect($(".drawer-msg .banner.err")?.textContent).toBe("先设置密钥");
 		expect(($(".drawer .drawer-toggle") as HTMLInputElement).checked).toBe(false);
+	});
+});
+
+describe("写操作和刷新的顺序", () => {
+	it("手动刷新等此前排队的写操作完成再发，刷新期间后来的写操作照常发出", async () => {
+		const server = fakeServer(state([
+			service("a", [model("gpt-6-sol", { enabled: true })], { latestPerFamily: true }),
+			service("b", []),
+		]));
+		await open(server);
+		server.calls.length = 0;
+		// b 的保存在等目录返回。
+		const slowSave = deferred<Json>();
+		server.handlers.saveService = () => slowSave.promise;
+		byText(".svc .name", "b")?.click();
+		await settle();
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		byText(".actions .btn", "保存")?.click();
+		await settle();
+		// 切到 a，关掉“每系最新”，开关立即显示关，请求还在队列里。
+		byText(".svc .name", "a")?.click();
+		await settle();
+		server.handlers.setLatestPerFamily = (body) => (server.current = state([
+			service("a", [model("gpt-6-sol", { enabled: true })], { latestPerFamily: body?.latestPerFamily }),
+			service("b", []),
+		]));
+		toggle($(".latest-toggle input"));
+		await settle();
+		expect(($(".latest-toggle input") as HTMLInputElement).checked).toBe(false);
+		const slowRefresh = deferred<Json>();
+		server.handlers.refresh = () => slowRefresh.promise;
+		byText(".head .btn", "刷新目录")?.click();
+		await settle();
+		expect(server.posts().map((call) => call.path)).toEqual(["saveService"]);
+
+		slowSave.resolve(server.current);
+		await settle();
+		expect(server.posts().map((call) => call.path)).toEqual(["saveService", "setLatestPerFamily", "refresh"]);
+		expect(server.posts()[1].body).toEqual({ name: "a", latestPerFamily: false });
+
+		// 刷新还没返回，这时的写操作不用等它。b 保存成功后页面切到了 b，先回到 a。
+		byText(".svc .name", "a")?.click();
+		await settle();
+		toggle(rowOf("gpt-6-sol").querySelector(".switch"));
+		await settle();
+		expect(server.posts().map((call) => call.path)).toEqual(["saveService", "setLatestPerFamily", "refresh", "setEnabled"]);
+		slowRefresh.resolve(server.current);
+		await settle();
+		expect(byText(".head .btn", "刷新目录")).toBeTruthy();
+	});
+
+	it("重新启用服务后的后台刷新也排在此前的写操作后面", async () => {
+		const server = fakeServer(state([service("a", [], { status: { disabled: true, keySource: "file" } }), service("b", [model("b-1")])]));
+		await open(server);
+		server.calls.length = 0;
+		// 重新启用 a 的请求还没返回时，又在 b 里启用了模型。a 的刷新要等 b 的这次修改完成。
+		const slowEnable = deferred<Json>();
+		const slowWrite = deferred<Json>();
+		server.handlers.setServiceDisabled = () => slowEnable.promise;
+		server.handlers.setEnabled = () => slowWrite.promise;
+		// 左栏里 b 在前，停用的 a 在后。
+		toggle($$(".svc .switch")[1]);
+		await settle();
+		toggle(rowOf("b-1").querySelector(".switch"));
+		await settle();
+		expect(server.posts().map((call) => call.path)).toEqual(["setServiceDisabled"]);
+		slowEnable.resolve(server.current = state([service("a", []), service("b", [model("b-1")])]));
+		await settle();
+		expect(server.posts().map((call) => call.path)).toEqual(["setServiceDisabled", "setEnabled"]);
+		slowWrite.resolve(server.current);
+		await settle();
+		expect(server.posts().map((call) => call.path)).toEqual(["setServiceDisabled", "setEnabled", "refresh"]);
+		expect(server.posts()[2].body).toEqual({ name: "a" });
+	});
+
+	it("同一开关连续“开 → 关”，第一个请求先完成时开关仍显示关", async () => {
+		const server = fakeServer(state([service("relay", [])]));
+		await open(server);
+		const replies = [deferred<Json>(), deferred<Json>()];
+		let n = 0;
+		server.handlers.setLatestPerFamily = () => replies[n++].promise;
+		const input = () => $(".latest-toggle input") as HTMLInputElement;
+		toggle(input());
+		await settle();
+		expect(input().checked).toBe(true);
+		toggle(input());
+		await settle();
+		expect(input().checked).toBe(false);
+		replies[0].resolve(state([service("relay", [], { latestPerFamily: true })]));
+		await settle();
+		expect(input().checked).toBe(false);
+		expect($(".latest-toggle")?.textContent).toContain("未开启");
+		replies[1].resolve(state([service("relay", [], { latestPerFamily: false })]));
+		await settle();
+		expect(input().checked).toBe(false);
+		expect(server.posts().filter((call) => call.path === "setLatestPerFamily").map((call) => call.body?.latestPerFamily)).toEqual([true, false]);
+	});
+
+	it("按着指针时推迟采用后台刷新带来的状态，松开后再采用", async () => {
+		const refresh = deferred<Json>();
+		const server = fakeServer(state([service("relay", [model("gpt-6-sol")])]));
+		server.handlers.refresh = () => refresh.promise;
+		await open(server);
+		document.dispatchEvent(new Event("pointerdown"));
+		refresh.resolve(state([service("relay", [model("gpt-6.1-sol"), model("gpt-6-sol")])]));
+		await settle();
+		expect(rowIds()).toEqual(["gpt-6-sol"]);
+		expect(byText(".head .btn", "刷新中…")).toBeTruthy();
+		document.dispatchEvent(new Event("pointerup"));
+		await settle();
+		expect(rowIds()).toEqual(["gpt-6.1-sol", "gpt-6-sol"]);
+		expect(byText(".head .btn", "刷新目录")).toBeTruthy();
+	});
+});
+
+describe("草稿和冻结的范围", () => {
+	it("同一服务切换标签页时保留服务表单和密钥草稿，切换服务后丢掉", async () => {
+		const server = fakeServer(state([service("relay", []), service("cpa", [])]));
+		await open(server);
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		await type($(".key-row input"), "sk-typed");
+		await type($$(".form input")[0], "新名字");
+		byText(".tab", "模型")?.click();
+		await settle();
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		expect(($(".key-row input") as HTMLInputElement).value).toBe("sk-typed");
+		expect(($$(".form input")[0] as HTMLInputElement).value).toBe("新名字");
+
+		byText(".svc .name", "cpa")?.click();
+		await settle();
+		byText(".svc .name", "relay")?.click();
+		await settle();
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		expect(($(".key-row input") as HTMLInputElement).value).toBe("");
+		expect(($$(".form input")[0] as HTMLInputElement).value).toBe("");
+	});
+
+	it("添加服务的草稿在再点“添加服务”时丢掉", async () => {
+		const server = fakeServer(state([service("relay", [])]));
+		await open(server);
+		byText(".side-foot .btn", "添加服务")?.click();
+		await settle();
+		await type($$(".form input")[2], "https://x.test");
+		byText(".side-foot .btn", "添加服务")?.click();
+		await settle();
+		expect(($$(".form input")[2] as HTMLInputElement).value).toBe("");
+	});
+
+	it("保存成功后按服务端返回的值重填表单", async () => {
+		const server = fakeServer(state([service("relay", [])]));
+		await open(server);
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		await type($$(".form input")[2], "https://relay.test/v1/");
+		server.handlers.saveService = () => (server.current = state([service("relay", [], { baseUrl: "https://relay.test" })]));
+		byText(".actions .btn", "保存")?.click();
+		await settle();
+		expect(server.posts().at(-1)?.body?.service.baseUrl).toBe("https://relay.test/v1/");
+		expect(($$(".form input")[2] as HTMLInputElement).value).toBe("https://relay.test");
+		byText(".tab", "模型")?.click();
+		await settle();
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		expect(($$(".form input")[2] as HTMLInputElement).value).toBe("https://relay.test");
+	});
+
+	it("切换标签页保留冻结的行，进入“添加服务”再回来后重新选", async () => {
+		const server = fakeServer(state([service("relay", [model("a-1", { enabled: true, hidden: true }), model("a-2")]), service("cpa", [])]));
+		await open(server);
+		server.handlers.setEnabled = () => (server.current = state([service("relay", [model("a-1", { hidden: true }), model("a-2")]), service("cpa", [])]));
+		toggle(rowOf("a-1").querySelector(".switch"));
+		await settle();
+		expect(rowIds()).toEqual(["a-2", "a-1"]);
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		byText(".tab", "模型")?.click();
+		await settle();
+		expect(rowIds()).toEqual(["a-2", "a-1"]);
+		byText(".side-foot .btn", "添加服务")?.click();
+		await settle();
+		byText(".svc .name", "relay")?.click();
+		await settle();
+		expect(rowIds()).toEqual(["a-2"]);
+	});
+
+	it("A 正在“换成新版”时切到 B，B 的横幅按钮照常可用", async () => {
+		const updates = [{ from: "x-1", to: "x-2" }];
+		const server = fakeServer(state([service("a", [], { updates }), service("b", [], { updates })]));
+		await open(server);
+		const slow = deferred<Json>();
+		server.handlers.applyLatestOnce = () => slow.promise;
+		byText(".latest-banner .btn", "换成新版")?.click();
+		await settle();
+		expect(byText(".latest-banner .btn", "替换中…")?.hasAttribute("disabled")).toBe(true);
+		byText(".svc .name", "b")?.click();
+		await settle();
+		const button = byText(".latest-banner .btn", "换成新版");
+		expect(button).toBeTruthy();
+		expect(button?.hasAttribute("disabled")).toBe(false);
+		slow.resolve({ ...server.current, replaced: [] });
+		await settle();
+		expect($(".toast")?.textContent).toBe("没有可换的新版，页面已更新");
+	});
+});
+
+describe("详情面板的提示和测试档位", () => {
+	const levels = (list: string[]) => ({ levels: list, thinkingLevelMap: { value: {}, source: "manual" } });
+
+	it("选中的测试档位被手动设置去掉后，按“不设置”显示和发送", async () => {
+		const server = fakeServer(state([service("relay", [model("a-1", levels(["off", "low", "high"]))])]));
+		await open(server);
+		rowOf("a-1").click();
+		await settle();
+		const pick = () => $(".drawer-foot select") as HTMLSelectElement;
+		pick().value = "high";
+		pick().dispatchEvent(new Event("change", { bubbles: true }));
+		await settle();
+		await type($$(".drawer .form input")[4], "low");
+		server.handlers.setOverride = () => state([service("relay", [model("a-1", { ...levels(["low"]), override: { thinkingLevels: ["low"] } })])]);
+		byText(".drawer-foot .btn", "保存")?.click();
+		await settle();
+		expect([...pick().options].map((option) => option.value)).toEqual(["", "low"]);
+		expect(pick().value).toBe("");
+		server.handlers.testModel = (body) => ({ test: { ok: true, stopReason: "stop", text: "OK", durationMs: 100, request: { api: "x", baseUrl: "y", id: "a-1", thinkingLevel: body?.thinkingLevel } } });
+		byText(".drawer-foot .btn", "发送测试消息")?.click();
+		await settle();
+		expect(server.posts().at(-1)?.body).toEqual({ name: "relay", id: "a-1" });
+	});
+
+	it("提示区显示最新的内容：测试结果盖住旧的校验错误，新错误盖住测试结果", async () => {
+		const server = fakeServer(state([service("relay", [model("a-1")])]));
+		await open(server);
+		rowOf("a-1").click();
+		await settle();
+		await type($$(".drawer .form input")[2], "abc");
+		byText(".drawer-foot .btn", "保存")?.click();
+		await settle();
+		expect($(".drawer-msg .banner.err")?.textContent).toContain("不是正整数");
+		server.handlers.testModel = () => ({ test: { ok: true, stopReason: "stop", text: "OK", durationMs: 100, request: { api: "x", baseUrl: "y", id: "a-1" } } });
+		byText(".drawer-foot .btn", "发送测试消息")?.click();
+		await settle();
+		expect($(".drawer-msg .banner.err")).toBeNull();
+		expect($(".drawer-msg .result.ok")?.textContent).toContain("回复：OK");
+
+		server.handlers.setEnabled = () => ({ status: 400, error: "先设置密钥" });
+		toggle($(".drawer .drawer-toggle"));
+		await settle();
+		expect($(".drawer-msg")?.textContent).toBe("先设置密钥");
+		// 操作成功后错误清掉，被盖住的测试结果不再出现。
+		server.handlers.setEnabled = () => server.current;
+		toggle($(".drawer .drawer-toggle"));
+		await settle();
+		expect($(".drawer-msg")?.matches(":empty")).toBe(true);
 	});
 });
 
