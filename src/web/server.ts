@@ -176,9 +176,11 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 			await writeDefaultModel(name, id);
 			return undefined;
 		}
-		case "clearDefaultModel":
-			await clearDefaultModel();
-			return undefined;
+		case "clearDefaultModel": {
+			// 带上页面认为的当前默认模型，已经被换掉时不清除，返回最新状态。
+			const cleared = await clearDefaultModel({ provider: str(body.name, "name"), id: str(body.id, "id") });
+			return cleared ? undefined : { ...state(endpoints), defaultChanged: true };
+		}
 		case "setEnabled":
 			endpoints.setEnabled(str(body.name, "name"), str(body.id, "id"), body.enabled === true);
 			return undefined;

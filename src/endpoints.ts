@@ -101,8 +101,13 @@ export class Endpoints {
 
 	/** 修改前调用：读最新的文件；文件损坏时拒绝修改。 */
 	private beginChange(): void {
+		this.commit(this.readSnapshot());
+	}
+
+	/** 读最新的文件快照，不换进内存。文件损坏时记下原因并拒绝，内存里的配置、密钥和缓存不变。 */
+	private readSnapshot(): Files {
 		try {
-			this.reload();
+			return readFiles();
 		} catch (error) {
 			this.loadError = describeError(error);
 			throw new Error(`${this.loadError}。修好文件后运行 /reload`);
@@ -140,10 +145,11 @@ export class Endpoints {
 		}
 	}
 
+	/** 注销成功后才从记录里去掉；出错时保留记录，下次 `registerAll()` 会再试。 */
 	private unregister(name: string): void {
+		if (this.registered.has(name) && !this.sync(name, () => this.pi.unregisterProvider(name))) return;
+		this.registered.delete(name);
 		this.betas.delete(name);
-		if (!this.registered.delete(name)) return;
-		this.sync(name, () => this.pi.unregisterProvider(name));
 	}
 
 	/** 向 pi 注册或注销。出错时记下原因，不抛出：配置已经保存，调用方照常返回，后台任务也不会产生未处理的拒绝。 */
@@ -169,6 +175,7 @@ export class Endpoints {
 			this.unregister(name);
 			return;
 		}
+		const betas = new Map(models.map((model) => [model.id, model.betas]));
 		const registered = this.sync(name, () => this.pi.registerProvider(name, {
 			name: service.displayName || name,
 			baseUrl: service.baseUrl,
@@ -178,7 +185,7 @@ export class Endpoints {
 			// 会话、压缩和摘要请求都经过这里，插件事件 before_provider_request 覆盖不到后两者。
 			streamSimple: (model, context, options) =>
 				streamSimpleAnthropic(model as Model<"anthropic-messages">, context, withBetas(options, this.betas.get(name)?.get(model.id) ?? [])),
-			models: this.piModels(name, models),
+			models: models.map(toPiModel),
 			// 交互模式和 RPC 模式启动后、打开 /model 时，pi 会调用它刷新目录。
 			// 重新注册时 pi 会以 allowNetwork: false 再调用一次，这时不刷新，也就不会再触发 models.dev 更新和“每系最新”。
 			refreshModels: async (context) => {
@@ -195,7 +202,10 @@ export class Endpoints {
 				return current ? this.piModels(name, this.enabledModels(current)) : [];
 			},
 		}));
-		if (registered) this.registered.add(name);
+		// 注册成功后才更新记录和 beta；失败时 pi 里还是上一次的注册。
+		if (!registered) return;
+		this.registered.add(name);
+		this.betas.set(name, betas);
 	}
 
 	private piModels(name: string, models: ResolvedModel[]) {
@@ -298,21 +308,28 @@ export class Endpoints {
 	 * 管理页的刷新：先像修改操作一样重新读取配置、密钥和缓存（文件读不了时抛错，内存不变），再刷新目录，
 	 * 等 models.dev 更新完（最多 60 秒），目录刷新成功时执行“每系最新”，立即生效。用户点刷新或打开页面是显式操作，
 	 * 可以在这里重新加载：pi 联网刷新时只写进磁盘的迁移，这时在本进程生效并显示在页面上。
-	 * 只注册最终结果：models.dev 数据变了（并由这里认领）或换了模型时全量注册，否则刷新成功时只注册这个服务。
+	 * 载入了快照就在最后全量注册一次（不管目录成功与否、有没有迁移），和其他修改操作一样：
+	 * 别的服务的配置也可能换了，它们的 `refreshModels` 会按内存里的新配置发布，注册必须跟内存一致。
+	 * 这次全量注册同时认领共享的 models.dev 下载，下载任务自己不再注册。
 	 * 返回目录刷新失败的原因；models.dev 失败不算刷新失败。
 	 */
 	async refreshForPage(name: string): Promise<string | undefined> {
 		this.beginChange();
 		let refreshError: string | undefined;
+		let replacements: Replacement[] = [];
+		let claim: (() => boolean) | undefined;
 		try {
-			await this.refresh(name);
-		} catch (error) {
-			refreshError = describeError(error);
+			try {
+				await this.refresh(name);
+			} catch (error) {
+				refreshError = describeError(error);
+			}
+			claim = await this.waitModelsDev();
+			if (refreshError === undefined) replacements = this.migrateAndCommit(name);
+		} finally {
+			claim?.();
+			this.registerAll();
 		}
-		const claim = await this.waitModelsDev();
-		const replacements = refreshError === undefined ? this.migrateAndCommit(name) : [];
-		if (claim() || replacements.length) this.registerAll();
-		else if (refreshError === undefined) this.register(name);
 		if (replacements.length) await this.afterMigration(name, replacements, "live");
 		return refreshError;
 	}
@@ -503,20 +520,21 @@ export class Endpoints {
 
 	/**
 	 * 开启或关闭“每系最新”，立即生效。开启时按缓存的目录立即执行一次，不刷新目录；models.dev 到期时先等它更新完（最多 60 秒）。
-	 * 开关和换过的启用列表一起保存，只注册一次。
+	 * 开关和换过的启用列表一起保存，只注册一次。先校验磁盘快照，等完 models.dev 再读一次最新快照，在快照上改；
+	 * 保存成功后才换进内存并注册，保存失败时内存不变。
 	 */
 	async setLatestPerFamily(name: string, on: boolean): Promise<void> {
-		this.requireService(name);
-		if (on) {
-			// 开关还没保存，needsModelsDev() 不会把这个服务算进去，所以不检查是否需要。下面总会全量注册，顺手认领。
-			(await this.waitModelsDev(true))();
-		}
-		this.beginChange();
-		const service = this.requireService(name);
+		requireIn(this.readSnapshot(), name);
+		// 开关还没保存，needsModelsDev() 不会把这个服务算进去，所以不检查是否需要。认领留到真正注册时。
+		const claim = on ? await this.waitModelsDev(true) : undefined;
+		const files = this.readSnapshot();
+		const service = requireIn(files, name);
 		service.latestPerFamily = on || undefined;
-		const plan = this.planLatest(service, this.cache[name]);
+		const plan = this.planLatest(service, files.cache[name]);
 		if (plan) service.enabled = plan.enabled;
-		saveConfig(this.config);
+		saveConfig(files.config);
+		this.commit(files);
+		claim?.();
 		this.registerAll();
 		if (plan) await this.afterMigration(name, plan.replacements, "live");
 	}
@@ -564,6 +582,13 @@ interface Files {
 /** 读配置、密钥和目录缓存三个文件，不改内存状态。配置或密钥文件损坏时抛出错误。 */
 function readFiles(): Files {
 	return { config: loadConfig(), auth: loadAuth(), cache: loadCache() };
+}
+
+/** 在文件快照里取服务，没有时报错。 */
+function requireIn(files: Files, name: string): ServiceConfig {
+	const service = files.config.services.find((item) => item.name === name);
+	if (!service) throw new Error(`没有名为 ${name} 的服务`);
+	return service;
 }
 
 const FALLBACK_SOURCES = new Set<Source>(["modelsdev", "default"]);

@@ -313,9 +313,20 @@ describe("pi 默认模型", () => {
 	it("取消时删掉默认模型，保留其他设置", async () => {
 		writeFileSync(settingsFile(), JSON.stringify({ defaultThinkingLevel: "high", enabledModels: ["relay/model-x"] }));
 		await call("/api/setDefaultModel", { name: "relay", id: "model-x" });
-		const state = await (await call("/api/clearDefaultModel", {})).json();
+		const state = await (await call("/api/clearDefaultModel", { name: "relay", id: "model-x" })).json();
 		expect(state.defaultModel).toBeUndefined();
+		expect(state.defaultChanged).toBeUndefined();
 		expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ defaultThinkingLevel: "high", enabledModels: ["relay/model-x"] });
+	});
+
+	it("页面带的默认模型和当前的不一致时不清除，返回最新状态", async () => {
+		await call("/api/setDefaultModel", { name: "relay", id: "model-x" });
+		const before = readFileSync(settingsFile(), "utf8");
+		const state = await (await call("/api/clearDefaultModel", { name: "relay", id: "old-model" })).json();
+		expect(state.defaultChanged).toBe(true);
+		expect(state.defaultModel).toEqual({ provider: "relay", id: "model-x" });
+		expect(readFileSync(settingsFile(), "utf8")).toBe(before);
+		expect((await call("/api/clearDefaultModel", {})).status).toBe(400);
 	});
 
 	it("没启用的模型和停用的服务不能设为默认", async () => {

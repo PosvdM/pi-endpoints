@@ -676,7 +676,9 @@ function star(item, model) {
 		const title = usable ? "pi 默认模型，点击取消" : "pi 默认模型，但它现在没有注册到 pi，pi 启动时会改用别的模型。点击取消";
 		return h("button", { class: `star${usable ? " on" : ""}`, title, onclick: async (event) => {
 			event.stopPropagation();
-			await run("clearDefaultModel", {}, "已取消 pi 默认模型，运行中的 pi 需执行 /reload");
+			// 带上这颗星代表的模型：默认模型已经被换掉时服务端不清除，只返回最新状态。
+			const data = await run("clearDefaultModel", { name: item.name, id: model.id });
+			if (data) toast(data.defaultChanged ? "pi 默认模型已经换了，没有取消，页面已更新" : "已取消 pi 默认模型，运行中的 pi 需执行 /reload");
 		}, html: STAR(true) });
 	}
 	if (!usable) {

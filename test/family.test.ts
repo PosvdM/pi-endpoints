@@ -140,6 +140,14 @@ describe("pickLatest", () => {
 		expect(pickLatest(["claude-sonnet-4"], ["claude-sonnet-4-5"], ["claude-sonnet-4-5"]).enabled).toEqual(["claude-sonnet-4-5"]);
 	});
 
+	it("旧 id 从目录消失，同版本候选里既有带日期的也有不带日期的时，选日期最新的", () => {
+		const catalog = ["claude-sonnet-4.5", "claude-sonnet-4-5-20250101", "claude-sonnet-4-5-20250929"];
+		expect(pickLatest(["claude-sonnet-4-5"], catalog, catalog)).toEqual({
+			enabled: ["claude-sonnet-4-5-20250929"],
+			replacements: [{ from: "claude-sonnet-4-5", to: "claude-sonnet-4-5-20250929" }],
+		});
+	});
+
 	it("deepseek-v3 的日期版本按日期比较，和不带日期的 deepseek-v3 算同一版本", () => {
 		const catalog = ["deepseek-v3-0324", "deepseek-v3-1120"];
 		expect(pickLatest(["deepseek-v3-0324"], catalog, catalog).enabled).toEqual(["deepseek-v3-1120"]);

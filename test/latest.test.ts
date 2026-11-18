@@ -1,4 +1,4 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,6 +92,7 @@ function fakeRuntime() {
 			offlineAll();
 		},
 		unregisterProvider: (name: string) => {
+			if (failRegister) throw new Error("注销被拒绝");
 			providers.delete(name);
 			offlineAll();
 		},
@@ -184,6 +185,66 @@ describe("每系最新", () => {
 		expect(endpoints.status()[0].missing).toEqual([]);
 		expect(registrations()).toBe(before + 1);
 		expect(providers.get("cpa")?.models?.map((model) => model.id)).toEqual(["gpt-6.2-sol"]);
+	});
+
+	it("管理页刷新载入别的 pi 改过的配置后全量注册：目录失败时，其他服务的地址、密钥和请求头也是新的", async () => {
+		const catalogs: Catalogs = { "b.test": { ids: ["n-1"] }, "b2.test": { ids: ["n-1"] } };
+		stubNetwork(catalogs);
+		const runtime = fakeRuntime();
+		const endpoints = new Endpoints(runtime.pi);
+		for (const name of ["a", "b"]) {
+			endpoints.saveService({ name, baseUrl: `https://${name}.test`, enabled: [name === "a" ? "m-1" : "n-1"], overrides: {}, headers: { "x-test": "old" } });
+			endpoints.setKey(name, "k");
+		}
+		const other = new Endpoints(fakeRuntime().pi);
+		other.saveService({ name: "b", baseUrl: "https://b2.test", enabled: ["n-1"], overrides: {}, headers: { "x-test": "new" } } as never, "b");
+		other.setKey("b", "k2");
+		expect(runtime.providers.get("b")?.baseUrl).toBe("https://b.test");
+		// a 的目录请求 404。
+		expect(await endpoints.refreshForPage("a")).toBeDefined();
+		const b = runtime.providers.get("b");
+		expect(b?.baseUrl).toBe("https://b2.test");
+		expect(b?.apiKey).toBe("k2");
+		expect(b?.models?.[0].headers).toEqual({ "x-test": "new" });
+		expect(endpoints.apiKey("b")).toBe("k2");
+	});
+
+	it("打开开关时保存失败：内存里的开关和启用列表不变，不注册", async () => {
+		const { endpoints, registrations } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
+		const blocker = `${configFile()}.${process.pid}.tmp`;
+		mkdirSync(blocker);
+		const before = registrations();
+		await expect(endpoints.setLatestPerFamily("cpa", true)).rejects.toThrow();
+		rmSync(blocker, { recursive: true });
+		expect(endpoints.service("cpa")).toMatchObject({ enabled: ["gpt-6.1-sol"] });
+		expect(endpoints.service("cpa")?.latestPerFamily).toBeUndefined();
+		expect(readConfig().services[0].latestPerFamily).toBeUndefined();
+		expect(registrations()).toBe(before);
+	});
+
+	it("开关等 models.dev 时文件坏了：开关报错，后台更新照常全量注册", async () => {
+		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+		const { endpoints, registrations } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { preset: true });
+		const before = registrations();
+		const background = endpoints.updateModelsDev();
+		const toggle = endpoints.setLatestPerFamily("cpa", true);
+		writeFileSync(join(temp.dir, "endpoints-auth.json"), "{ broken");
+		await expect(toggle).rejects.toThrow("endpoints-auth.json");
+		await background;
+		expect(registrations()).toBe(before + 1);
+	});
+
+	it("注销出错时保留注册记录并记下原因，下次全量注册时重试", async () => {
+		const { endpoints, providers, failRegistration } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		failRegistration(true);
+		endpoints.setKey("cpa", "");
+		expect(endpoints.status()[0]).toMatchObject({ registered: true, syncError: expect.stringContaining("注销被拒绝") });
+		expect(providers.has("cpa")).toBe(true);
+		failRegistration(false);
+		endpoints.registerAll();
+		expect(endpoints.status()[0].registered).toBe(false);
+		expect(endpoints.status()[0].syncError).toBeUndefined();
+		expect(providers.has("cpa")).toBe(false);
 	});
 
 	it("管理页刷新时文件读不了就拒绝，内存状态不变，也不请求目录", async () => {
@@ -429,7 +490,7 @@ describe("每系最新", () => {
 		expect(endpoints.status()[0].syncError).toContain("注册被拒绝");
 	});
 
-	it("管理页并行刷新多个服务时，共享的 models.dev 下载完成后只全量注册一次", async () => {
+	it("管理页并行刷新多个服务时，共享的 models.dev 下载不另外触发全量注册", async () => {
 		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
 		const catalogs: Catalogs = { "a.test": { ids: ["m-1"] }, "b.test": { ids: ["n-1"] } };
 		stubNetwork(catalogs);
@@ -441,8 +502,8 @@ describe("每系最新", () => {
 		}
 		const before = runtime.registrations();
 		expect(await Promise.all([endpoints.refreshForPage("a"), endpoints.refreshForPage("b")])).toEqual([undefined, undefined]);
-		// 一次全量注册（两个服务），另一次刷新只注册自己的服务。
-		expect(runtime.registrations()).toBe(before + 3);
+		// 两次刷新各全量注册一次（每次两个服务），共享的下载认领后不再自己注册。
+		expect(runtime.registrations()).toBe(before + 4);
 	});
 
 	describe("pi 设置", () => {

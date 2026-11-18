@@ -62,16 +62,22 @@ async function writeDefaultModelNow(provider: string, id: string): Promise<void>
 	await save(settings);
 }
 
-/** 删掉 settings.json 里的默认模型，pi 新开会话时改用 Ctrl+P 列表的第一个或 pi 自带的默认模型。 */
-export function clearDefaultModel(): Promise<void> {
-	return serialized(clearDefaultModelNow);
+/**
+ * 删掉 settings.json 里的默认模型，pi 新开会话时改用 Ctrl+P 列表的第一个或 pi 自带的默认模型。
+ * 只在当前的默认模型仍是 `expected` 时清除，否则不写文件并返回假：页面显示的可能是已经被“每系最新”或别的 pi 换掉的旧默认。
+ * 核对和清除在同一个队列任务里完成。
+ */
+export function clearDefaultModel(expected: DefaultModel): Promise<boolean> {
+	return serialized(() => clearDefaultModelNow(expected));
 }
 
-async function clearDefaultModelNow(): Promise<void> {
+async function clearDefaultModelNow(expected: DefaultModel): Promise<boolean> {
 	const settings = open();
+	if (settings.getDefaultProvider() !== expected.provider || settings.getDefaultModel() !== expected.id) return false;
 	// 类型只允许字符串；写入时值为 undefined 的字段会从 JSON 里去掉。
 	settings.setDefaultModelAndProvider(undefined as unknown as string, undefined as unknown as string);
 	await save(settings);
+	return true;
 }
 
 /**
