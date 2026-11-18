@@ -57,8 +57,10 @@ export function KeyCard({ store, service, drafts }) {
  * 添加服务（`service` 为 undefined）或修改已有服务的表单。保存成功后丢掉草稿，调用 `onSaved(新服务名)`。
  * @param {{ store: Store; service?: Service; drafts: Drafts; onSaved: (name: string) => void }} props
  */
-export function ServiceForm({ store, service, drafts, onSaved }) {
-	const isNew = !service;
+export function ServiceForm({ store, service: shown, drafts, onSaved }) {
+	const isNew = !shown;
+	// 初始值按最新采用的状态填：保存成功后表单以新的 key 重新挂载时，按着指针的话组件拿到的服务可能还没更新。
+	const service = shown && (store.latest().data.services.find((item) => item.name === shown.name) ?? shown);
 	const draft = draftKey.service(service?.name);
 	const saved = drafts.get(draft);
 	const [values, setValues] = useState(() => {
@@ -126,6 +128,12 @@ export function ServiceForm({ store, service, drafts, onSaved }) {
 		setBusy(false);
 		if (data) {
 			drafts.delete(draft);
+			// 改名后，旧名下没保存的密钥跟着服务换到新名下，免得改回旧名时又冒出来。
+			if (service && service.name !== name) {
+				const typed = drafts.get(draftKey.key(service.name));
+				drafts.delete(draftKey.key(service.name));
+				if (typed) drafts.set(draftKey.key(name), typed);
+			}
 			onSaved(name);
 		}
 	};

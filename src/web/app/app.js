@@ -85,7 +85,8 @@ export function App({ store, initialService }) {
 	// 详情面板里的模型最后一次出现在状态里的样子，见 Drawer 的 fallback。
 	const lastOpen = useRef(/** @type {{ key: string; model: import("./util.js").Model } | null} */ (null));
 
-	const firstService = () => serviceGroups(store.get().data.services, parked).flat()[0]?.name ?? "";
+	// 按最新采用的状态选，按住指针期间还没发布的服务也算在内。
+	const firstService = () => serviceGroups(store.latest().data.services, parked).flat()[0]?.name ?? "";
 
 	useEffect(() => {
 		store.load().then((state) => {
@@ -138,8 +139,8 @@ export function App({ store, initialService }) {
 	if (error) {
 		parts.push(html`<div class="banner err"><span class="grow">${error.text}</span><button class="close inherit" title="关闭" onClick=${() => store.setError(null)}>×</button></div>`);
 	}
-	if (current === null) {
-		// 还在加载。
+	if (current === null || !snapshot.loaded) {
+		// 还在加载，或者初始状态已经采用、但按着指针还没发布。
 	} else if (current === "" || (!service && data.services.length === 0)) {
 		parts.push(html`<div class="head"><div class="info"><h1>添加服务</h1>
 			<div class="facts">填好地址和密钥，添加后会自动拉取模型目录，再勾选要启用的模型。</div></div></div>`);
