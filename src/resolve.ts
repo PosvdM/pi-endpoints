@@ -293,7 +293,7 @@ export function resolveModel(
 	return {
 		id: model.id,
 		ownedBy: model.ownedBy,
-		hidden: (model.hidden ?? false) || IMAGE_MODEL.test(model.id) || (modelType !== undefined && modelType !== "chat"),
+		hidden: serverHidden(model) || (modelType !== undefined && modelType !== "chat"),
 		missing,
 		// 去掉后缀才匹配上时不借用名字，否则 claude-opus-5-5 和 claude-opus-5-5-high 会显示成同一个名字。
 		name: pick(
@@ -328,6 +328,11 @@ export function resolveModel(
  * 却把 gemini-3.1-flash-image 这类模型标成显示，所以按名字补上。
  */
 const IMAGE_MODEL = /(^|[-_/.])image([-_/.]|$)/i;
+
+/** 不依赖 models.dev 就能判断的隐藏：服务端标为隐藏，或者名字里有独立的 image 一词（图片生成模型）。 */
+export function serverHidden(model: CatalogModel): boolean {
+	return (model.hidden ?? false) || IMAGE_MODEL.test(model.id);
+}
 
 function sameModel(builtinId: string, id: string): boolean {
 	return builtinId === id || builtinId === id.slice(id.lastIndexOf("/") + 1);

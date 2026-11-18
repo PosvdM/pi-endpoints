@@ -5,6 +5,7 @@ import { withBetas } from "./betas.ts";
 import { builtinProviderIds } from "./builtin.ts";
 import { type Catalog, CatalogError, fetchCatalog } from "./catalog.ts";
 import {
+	dict,
 	type EndpointsConfig,
 	escapeConfigValue,
 	type KeySource,
@@ -23,9 +24,19 @@ import {
 	type ServiceConfig,
 } from "./config.ts";
 import { replaceModels } from "./defaults.ts";
-import { type LatestResult, pickLatest, type Replacement } from "./family.ts";
+import { type LatestResult, mayReplace, pickLatest, type Replacement } from "./family.ts";
 import { hasModelsDevData, loadModelsDev, updateModelsDev } from "./modelsdev.ts";
-import { isChatModel, PI_LEVELS, type ResolvedModel, resolveModel, resolveService, type Source, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
+import {
+	isChatModel,
+	PI_LEVELS,
+	type ResolvedModel,
+	resolveModel,
+	resolveService,
+	serverHidden,
+	type Source,
+	SUPPORTED_APIS,
+	toProviderModel,
+} from "./resolve.ts";
 
 export interface ServiceStatus {
 	name: string;
@@ -66,8 +77,8 @@ export class Endpoints {
 	config: EndpointsConfig = { services: [] };
 	/** 配置或密钥文件读不了时的原因。这时拒绝修改，免得覆盖用户待修的文件。 */
 	loadError?: string;
-	private auth: AuthFile = {};
-	private cache: CacheFile = {};
+	private auth: AuthFile = dict({});
+	private cache: CacheFile = dict({});
 	private errors = new Map<string, string>();
 	private syncErrors = new Map<string, string>();
 	private registered = new Set<string>();
@@ -240,15 +251,16 @@ export class Endpoints {
 	}
 
 	/**
-	 * 开关关着的服务在不看模型类型时能不能算出替换：候选只去掉隐藏模型，其余规则和前提同 `planLatest()`。
-	 * 能算出时才需要 models.dev 来排除非对话模型，目录里没有候选新版的服务不触发下载。
+	 * 开关关着的服务在拿到 models.dev 后有没有可能算出替换，前提同 `planLatest()`。保守判断（`mayReplace()`）：
+	 * 候选只去掉不依赖 models.dev 的隐藏模型（`serverHidden()`），不用 models.dev 已有的分类，分类变了也能重新下载。
+	 * 可能有替换时才需要 models.dev 来排除非对话模型，目录里没有候选新版的服务不触发下载。
 	 */
 	private mayHaveUpdates(service: ServiceConfig): boolean {
 		if (service.latestPerFamily || service.disabled || service.enabled.length === 0) return false;
 		const catalog = latestCatalog(service, this.cache[service.name]);
 		if (!catalog) return false;
-		const candidates = catalog.models.filter((model) => !resolveModel(service, model, catalog).hidden).map((model) => model.id);
-		return pickLatest(service.enabled, candidates, catalog.models.map((model) => model.id)).replacements.length > 0;
+		const candidates = catalog.models.filter((model) => !serverHidden(model)).map((model) => model.id);
+		return mayReplace(service.enabled, candidates, catalog.models.map((model) => model.id));
 	}
 
 	/**
@@ -474,7 +486,8 @@ export class Endpoints {
 			return;
 		}
 		const service = files.config.services.find((item) => item.name === name);
-		if (!service || service.latestPerFamily) return;
+		// 密钥被别的 pi 删掉的服务不提醒：用户已经不再用它。管理页的 updates 不看密钥。
+		if (!service || service.latestPerFamily || !resolveKey(service, files.auth)) return;
 		const updates = this.pendingUpdates(service, files.cache[name]);
 		const notified = loadState().notifiedUpdates[name] ?? [];
 		const seen = new Set(notified.map(replacementKey));
@@ -482,7 +495,7 @@ export class Endpoints {
 		const shown =
 			fresh.length > 0 &&
 			this.tryNotify(
-				`${service.displayName || name} 有新版模型：${describeReplacements(fresh)}。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。`,
+				`${service.displayName || name} 有新版模型：${describeReplacements(fresh)}。输入 /endpoints，在模型页点“换成新版”只换这一次，或点“开启自动替换”以后自动换。`,
 				"warning",
 			);
 		const pending = new Set(updates.map(replacementKey));

@@ -565,7 +565,7 @@ describe("新版提醒", () => {
 		const before = registrations();
 		expect(await refreshModels()).toEqual(["published"]);
 		expect(notes).toEqual([
-			["Magpie 有新版模型：gpt-6.1-sol → gpt-6.2-sol。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。", "warning"],
+			["Magpie 有新版模型：gpt-6.1-sol → gpt-6.2-sol。输入 /endpoints，在模型页点“换成新版”只换这一次，或点“开启自动替换”以后自动换。", "warning"],
 		]);
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).defaultModel).toBe("gpt-6.1-sol");
@@ -603,7 +603,7 @@ describe("新版提醒", () => {
 		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol", "claude-opus-5-5", "claude-opus-5-6"];
 		await refreshModels();
 		expect(notes).toEqual([
-			["cpa 有新版模型：gpt-6.1-sol → gpt-6.2-sol、claude-opus-5-5 → claude-opus-5-6。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。", "warning"],
+			["cpa 有新版模型：gpt-6.1-sol → gpt-6.2-sol、claude-opus-5-5 → claude-opus-5-6。输入 /endpoints，在模型页点“换成新版”只换这一次，或点“开启自动替换”以后自动换。", "warning"],
 		]);
 	});
 
@@ -645,6 +645,36 @@ describe("新版提醒", () => {
 		await refreshModels();
 		expect(notes).toHaveLength(1);
 		expect(readState().notifiedUpdates.cpa).toHaveLength(1);
+	});
+
+	it("磁盘上的密钥被删掉时不提醒，管理页的 updates 不变", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		writeFileSync(join(temp.dir, "endpoints-auth.json"), "{}");
+		expect(await refreshModels()).toEqual(["published"]);
+		expect(notes).toEqual([]);
+		expect(existsSync(stateFile())).toBe(false);
+		expect(endpoints.updates("cpa")).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+	});
+
+	it("服务名是 constructor 时不会读到继承的属性：状态文件不存在时照常提示并记录", async () => {
+		const catalogs: Catalogs = { "c.test": { ids: ["gpt-6.1-sol"] } };
+		stubNetwork(catalogs);
+		const runtime = fakeRuntime();
+		const endpoints = new Endpoints(runtime.pi);
+		// 还没有目录缓存时，状态里也不能把继承的属性当成目录。
+		endpoints.saveService({ name: "constructor", baseUrl: "https://c.test", enabled: ["gpt-6.1-sol"], overrides: {} });
+		expect(endpoints.status()[0]).toMatchObject({ name: "constructor", catalogSize: undefined, missing: [] });
+		endpoints.setKey("constructor", "k");
+		const notes = listen(endpoints);
+		catalogs["c.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		expect(existsSync(stateFile())).toBe(false);
+		expect(await runtime.refreshAll(["constructor"])).toEqual(["published"]);
+		expect(notes).toHaveLength(1);
+		expect(readState().notifiedUpdates.constructor).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+		await runtime.refreshAll(["constructor"]);
+		expect(notes).toHaveLength(1);
 	});
 
 	it("models.dev 没有数据时推迟，不提示也不记录；有数据后的下次刷新再提示，非对话模型不算新版", async () => {
@@ -699,6 +729,20 @@ describe("新版提醒", () => {
 			await refreshModels();
 			await endpoints.updateModelsDev();
 			expect(existsSync(join(temp.dir, "endpoints-modelsdev.json"))).toBe(true);
+		});
+
+		it("已有的 models.dev 分类不影响判断：分类为非对话的候选也算，分类更新后才能重新判断", async () => {
+			const { endpoints } = await setup(["jev-test-1"], ["jev-test-1", "jev-test-2"]);
+			for (const id of ["jev-test-1", "jev-test-2"]) endpoints.setOverride("cpa", id, full);
+			expect(endpoints.models("cpa").find((model) => model.id === "jev-test-2")?.hidden).toBe(true);
+			expect(endpoints.needsModelsDev()).toBe(true);
+		});
+
+		it("同系有更新的已启用成员、按全部候选会整系不动时也算需要", async () => {
+			const { endpoints } = await setup(["m-1", "m-2", "m-4"], ["m-2", "m-3"]);
+			for (const id of ["m-1", "m-2", "m-3", "m-4"]) endpoints.setOverride("cpa", id, full);
+			expect(endpoints.updates("cpa")).toEqual([]);
+			expect(endpoints.needsModelsDev()).toBe(true);
 		});
 
 		it("目录缓存的来源地址和服务地址不同时不算候选", async () => {

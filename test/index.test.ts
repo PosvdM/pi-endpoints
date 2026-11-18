@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { pageUrl } from "../src/commands.ts";
+import { browserCommand, pageUrl } from "../src/commands.ts";
 import { Endpoints } from "../src/endpoints.ts";
 import piEndpoints from "../src/index.ts";
 import { setModelsDevForTest } from "../src/modelsdev.ts";
@@ -100,5 +100,15 @@ describe("/endpoints 的网址", () => {
 		const endpoints = new Endpoints(fakePi().pi);
 		endpoints.setEnabled("cpa", "gpt-6.1-sol", false);
 		expect(pageUrl("http://127.0.0.1:1/?token=t", endpoints)).toBe("http://127.0.0.1:1/?token=t");
+	});
+});
+
+describe("打开浏览器的命令", () => {
+	const url = "http://127.0.0.1:1/?token=t&service=cpa";
+
+	it("网址整个作为一个参数，Windows 上不经过 cmd，& 不会截断网址", () => {
+		expect(browserCommand("win32", url)).toEqual(["rundll32", ["url.dll,FileProtocolHandler", url]]);
+		expect(browserCommand("darwin", url)).toEqual(["open", [url]]);
+		expect(browserCommand("linux", url)).toEqual(["xdg-open", [url]]);
 	});
 });

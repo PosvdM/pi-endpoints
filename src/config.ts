@@ -122,7 +122,7 @@ export function saveConfig(config: EndpointsConfig): void {
 }
 
 export function loadAuth(): AuthFile {
-	return readJson<AuthFile>(authPath(), {});
+	return dict(readJson<AuthFile>(authPath(), {}));
 }
 
 export function saveAuth(auth: AuthFile): void {
@@ -131,7 +131,7 @@ export function saveAuth(auth: AuthFile): void {
 
 export function loadCache(): CacheFile {
 	try {
-		return readJson<CacheFile>(cachePath(), {});
+		return dict(readJson<CacheFile>(cachePath(), {}));
 	} catch {
 		// 缓存坏了就当没有，下次刷新会重写。
 		return {};
@@ -171,7 +171,7 @@ export function loadState(): StateFile {
 		return { notifiedUpdates: {} };
 	}
 	const notified = isRecord(raw) && isRecord(raw.notifiedUpdates) ? raw.notifiedUpdates : {};
-	const result: Record<string, Replacement[]> = {};
+	const result = dict<Replacement[]>({});
 	for (const [name, list] of Object.entries(notified)) {
 		if (!Array.isArray(list)) continue;
 		const valid = list.filter((item): item is Replacement => isRecord(item) && typeof item.from === "string" && typeof item.to === "string");
@@ -185,6 +185,16 @@ export function saveState(state: StateFile): void {
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * 按服务名取值的对象一律没有原型：`constructor` 这类合法的服务名在普通对象上会读到继承来的属性。
+ * 只复制自有属性；JSON 里的 `__proto__` 键在没有原型的对象上是普通属性。
+ */
+export function dict<T>(value: Record<string, T>): Record<string, T> {
+	const result = Object.create(null) as Record<string, T>;
+	if (isRecord(value)) for (const [key, item] of Object.entries(value)) result[key] = item as T;
+	return result;
+}
 
 export type KeySource = "env" | "file";
 
