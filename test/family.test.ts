@@ -165,8 +165,15 @@ describe("mayReplace", () => {
 		expect(pickLatest(enabled, ["m-2"], catalog).replacements).toEqual([{ from: "m-1", to: "m-2" }]);
 	});
 
-	it("已启用成员离开目录、同系还有成员时算可能替换", () => {
-		expect(mayReplace(["m-5"], ["m-1"], ["m-1"])).toBe(true);
+	it("已启用成员离开目录时，只有同版本或更新的成员才算可能替换", () => {
+		// 别名消失、只剩带日期的同版本 id：pickLatest 会换。
+		expect(pickLatest(["claude-sonnet-4-5"], ["claude-sonnet-4-5-20250929"], ["claude-sonnet-4-5-20250929"]).replacements).toHaveLength(1);
+		expect(mayReplace(["claude-sonnet-4-5"], ["claude-sonnet-4-5-20250929"], ["claude-sonnet-4-5-20250929"])).toBe(true);
+		// 目录里只剩旧版：pickLatest 不会降级，这里也不算。
+		expect(pickLatest(["m-5"], ["m-1"], ["m-1"]).replacements).toEqual([]);
+		expect(mayReplace(["m-5"], ["m-1"], ["m-1"])).toBe(false);
+		// 同版本的成员还在目录里时不算。
+		expect(mayReplace(["claude-sonnet-4-5"], ["claude-sonnet-4-5-20250929"], ["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"])).toBe(false);
 	});
 
 	it("没有更新的成员、或者候选里没有这个系列时不算", () => {
