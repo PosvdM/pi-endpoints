@@ -122,7 +122,7 @@ export function saveConfig(config: EndpointsConfig): void {
 }
 
 export function loadAuth(): AuthFile {
-	return readJson<AuthFile>(authPath(), {});
+	return dict(readJson<AuthFile>(authPath(), {}));
 }
 
 export function saveAuth(auth: AuthFile): void {
@@ -131,7 +131,7 @@ export function saveAuth(auth: AuthFile): void {
 
 export function loadCache(): CacheFile {
 	try {
-		return readJson<CacheFile>(cachePath(), {});
+		return dict(readJson<CacheFile>(cachePath(), {}));
 	} catch {
 		// 缓存坏了就当没有，下次刷新会重写。
 		return {};
@@ -159,23 +159,31 @@ export function saveModelsDevFile(file: ModelsDevFile, path = modelsDevPath()): 
 /** 插件自己记下的运行状态，丢了也只会多提示一次。 */
 export interface StateFile {
 	/** 按服务名记录已经在 pi 里提示过的新版（开关关着时）。 */
-	notifiedUpdates: Record<string, Replacement[]>;
+	notifiedUpdates: Record<string, NotifiedUpdate[]>;
 }
 
-/** 读状态文件。文件损坏或结构不对时按空处理，不合规的记录丢掉。 */
+/** 提示过的一个替换，`at` 是提示的时间（毫秒时间戳）。 */
+export interface NotifiedUpdate extends Replacement {
+	at: number;
+}
+
+/**
+ * 读状态文件。文件损坏或结构不对时按空处理，只取自有属性，不合规的记录丢掉。
+ * 没有 `at` 或 `at` 不是有限数的记录按 0 处理，即已经过了重新提示的间隔。
+ */
 export function loadState(): StateFile {
+	const result = dict<NotifiedUpdate[]>({});
 	let raw: unknown;
 	try {
 		raw = readJson<unknown>(statePath(), {});
 	} catch {
-		return { notifiedUpdates: {} };
+		return { notifiedUpdates: result };
 	}
 	const notified = isRecord(raw) && isRecord(raw.notifiedUpdates) ? raw.notifiedUpdates : {};
-	const result: Record<string, Replacement[]> = {};
 	for (const [name, list] of Object.entries(notified)) {
 		if (!Array.isArray(list)) continue;
-		const valid = list.filter((item): item is Replacement => isRecord(item) && typeof item.from === "string" && typeof item.to === "string");
-		if (valid.length) result[name] = valid.map(({ from, to }) => ({ from, to }));
+		const valid = list.filter((item): item is NotifiedUpdate => isRecord(item) && typeof item.from === "string" && typeof item.to === "string");
+		if (valid.length) result[name] = valid.map(({ from, to, at }) => ({ from, to, at: Number.isFinite(at) ? at : 0 }));
 	}
 	return { notifiedUpdates: result };
 }
@@ -185,6 +193,16 @@ export function saveState(state: StateFile): void {
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * 按服务名取值的对象一律没有原型：`constructor` 这类合法的服务名在普通对象上会读到继承来的属性。
+ * 只复制自有属性；JSON 里的 `__proto__` 键在没有原型的对象上是普通属性。
+ */
+export function dict<T>(value: Record<string, T>): Record<string, T> {
+	const result = Object.create(null) as Record<string, T>;
+	if (isRecord(value)) for (const [key, item] of Object.entries(value)) result[key] = item as T;
+	return result;
+}
 
 export type KeySource = "env" | "file";
 

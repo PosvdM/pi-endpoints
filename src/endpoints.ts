@@ -5,6 +5,7 @@ import { withBetas } from "./betas.ts";
 import { builtinProviderIds } from "./builtin.ts";
 import { type Catalog, CatalogError, fetchCatalog } from "./catalog.ts";
 import {
+	dict,
 	type EndpointsConfig,
 	escapeConfigValue,
 	type KeySource,
@@ -23,9 +24,19 @@ import {
 	type ServiceConfig,
 } from "./config.ts";
 import { replaceModels } from "./defaults.ts";
-import { type LatestResult, pickLatest, type Replacement } from "./family.ts";
+import { type LatestResult, mayReplace, pickLatest, type Replacement } from "./family.ts";
 import { hasModelsDevData, loadModelsDev, updateModelsDev } from "./modelsdev.ts";
-import { isChatModel, PI_LEVELS, type ResolvedModel, resolveModel, resolveService, type Source, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
+import {
+	isChatModel,
+	PI_LEVELS,
+	type ResolvedModel,
+	resolveModel,
+	resolveService,
+	serverHidden,
+	type Source,
+	SUPPORTED_APIS,
+	toProviderModel,
+} from "./resolve.ts";
 
 export interface ServiceStatus {
 	name: string;
@@ -54,6 +65,8 @@ const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const URL_PATTERN = /^https?:\/\/./;
 const REFRESH_TIMEOUT_MS = 15_000;
+/** 同一个新版的提醒最多隔这么久再提示一次：某次提示被客户端静默丢掉时，不至于再也不提示。 */
+const RENOTIFY_MS = 7 * 24 * 60 * 60 * 1000;
 
 type AuthFile = ReturnType<typeof loadAuth>;
 type CacheFile = ReturnType<typeof loadCache>;
@@ -66,8 +79,8 @@ export class Endpoints {
 	config: EndpointsConfig = { services: [] };
 	/** 配置或密钥文件读不了时的原因。这时拒绝修改，免得覆盖用户待修的文件。 */
 	loadError?: string;
-	private auth: AuthFile = {};
-	private cache: CacheFile = {};
+	private auth: AuthFile = dict({});
+	private cache: CacheFile = dict({});
 	private errors = new Map<string, string>();
 	private syncErrors = new Map<string, string>();
 	private registered = new Set<string>();
@@ -240,15 +253,16 @@ export class Endpoints {
 	}
 
 	/**
-	 * 开关关着的服务在不看模型类型时能不能算出替换：候选只去掉隐藏模型，其余规则和前提同 `planLatest()`。
-	 * 能算出时才需要 models.dev 来排除非对话模型，目录里没有候选新版的服务不触发下载。
+	 * 开关关着的服务在拿到 models.dev 后有没有可能算出替换，前提同 `planLatest()`。保守判断（`mayReplace()`）：
+	 * 候选只去掉不依赖 models.dev 的隐藏模型（`serverHidden()`），不用 models.dev 已有的分类，分类变了也能重新下载。
+	 * 可能有替换时才需要 models.dev 来排除非对话模型，目录里没有候选新版的服务不触发下载。
 	 */
 	private mayHaveUpdates(service: ServiceConfig): boolean {
 		if (service.latestPerFamily || service.disabled || service.enabled.length === 0) return false;
 		const catalog = latestCatalog(service, this.cache[service.name]);
 		if (!catalog) return false;
-		const candidates = catalog.models.filter((model) => !resolveModel(service, model, catalog).hidden).map((model) => model.id);
-		return pickLatest(service.enabled, candidates, catalog.models.map((model) => model.id)).replacements.length > 0;
+		const candidates = catalog.models.filter((model) => !serverHidden(model)).map((model) => model.id);
+		return mayReplace(service.enabled, candidates, catalog.models.map((model) => model.id));
 	}
 
 	/**
@@ -460,9 +474,10 @@ export class Endpoints {
 	}
 
 	/**
-	 * pi 联网刷新目录成功后，开关关着的服务有新版时在 pi 里提示。每个“服务 + 旧 id → 新 id”只提示一次，
-	 * 提示确实显示了才记进 `endpoints-state.json`，没有界面时留到下次。顺手去掉已经不再待处理的记录。
-	 * 在重新读取的文件快照上计算，不改内存状态、不重新注册，也不等待任何东西。
+	 * pi 联网刷新目录成功后，开关关着的服务有新版时在 pi 里提示。同一个“服务 + 旧 id → 新 id”最多每
+	 * `RENOTIFY_MS`（7 天）提示一次，直到用户换掉旧版（替换不再待处理，记录随之去掉）或打开开关。
+	 * 提示确实显示了才记进 `endpoints-state.json`，没有能显示的界面时留到下次；即使某次提示被客户端静默丢掉，
+	 * 7 天后也会再提示。在重新读取的文件快照上计算，不改内存状态、不重新注册，也不等待任何东西。
 	 * 本进程还没有 models.dev 数据时推迟到下次刷新，记录也不动。
 	 */
 	private noticeUpdates(name: string): void {
@@ -474,21 +489,27 @@ export class Endpoints {
 			return;
 		}
 		const service = files.config.services.find((item) => item.name === name);
-		if (!service || service.latestPerFamily) return;
+		// 密钥被别的 pi 删掉的服务不提醒：用户已经不再用它。管理页的 updates 不看密钥。
+		if (!service || service.latestPerFamily || !resolveKey(service, files.auth)) return;
 		const updates = this.pendingUpdates(service, files.cache[name]);
+		const now = Date.now();
 		const notified = loadState().notifiedUpdates[name] ?? [];
-		const seen = new Set(notified.map(replacementKey));
-		const fresh = updates.filter((item) => !seen.has(replacementKey(item)));
+		const pending = new Set(updates.map(replacementKey));
+		// 已经不再待处理的记录去掉；间隔内提示过的不再提示。时钟回拨（at 晚于现在）时按已过间隔处理。
+		const kept = notified.filter((item) => pending.has(replacementKey(item)));
+		const recent = new Set(kept.filter((item) => now - item.at >= 0 && now - item.at < RENOTIFY_MS).map(replacementKey));
+		const due = updates.filter((item) => !recent.has(replacementKey(item)));
 		const shown =
-			fresh.length > 0 &&
+			due.length > 0 &&
 			this.tryNotify(
-				`${service.displayName || name} 有新版模型：${describeReplacements(fresh)}。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。`,
+				`${service.displayName || name} 有新版模型：${describeReplacements(due)}。输入 /endpoints，在模型页点“换成新版”只换这一次，或点“开启自动替换”以后自动换。`,
 				"warning",
 			);
-		const pending = new Set(updates.map(replacementKey));
-		const kept = notified.filter((item) => pending.has(replacementKey(item)));
 		if (!shown && kept.length === notified.length) return;
-		const next = shown ? [...kept, ...fresh] : kept;
+		const dueKeys = new Set(due.map(replacementKey));
+		const next = shown
+			? [...kept.filter((item) => !dueKeys.has(replacementKey(item))), ...due.map(({ from, to }) => ({ from, to, at: now }))]
+			: kept;
 		try {
 			// 写之前重新读，只改这个服务的记录。多个 pi 之间不加锁，最坏是同一个新版多提示一次。
 			const state = loadState();

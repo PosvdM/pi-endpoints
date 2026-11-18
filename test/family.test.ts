@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareMembers, familyOf, pickLatest } from "../src/family.ts";
+import { compareMembers, familyOf, mayReplace, pickLatest } from "../src/family.ts";
 
 describe("familyOf", () => {
 	it("去掉版本段得到系列名，保留最后一个 / 之前的前缀", () => {
@@ -152,5 +152,26 @@ describe("pickLatest", () => {
 		const catalog = ["deepseek-v3-0324", "deepseek-v3-1120"];
 		expect(pickLatest(["deepseek-v3-0324"], catalog, catalog).enabled).toEqual(["deepseek-v3-1120"]);
 		expect(pickLatest(["deepseek-v3"], [...catalog, "deepseek-v3"], [...catalog, "deepseek-v3"]).replacements).toEqual([]);
+	});
+});
+
+describe("mayReplace", () => {
+	it("同系有更新的已启用成员时，pickLatest 整系不动，这里仍算可能替换", () => {
+		const enabled = ["m-1", "m-2", "m-4"];
+		const catalog = ["m-2", "m-3"];
+		expect(pickLatest(enabled, catalog, catalog).replacements).toEqual([]);
+		expect(mayReplace(enabled, catalog, catalog)).toBe(true);
+		// 排除非对话的 m-3 后，m-1 确实会换成 m-2。
+		expect(pickLatest(enabled, ["m-2"], catalog).replacements).toEqual([{ from: "m-1", to: "m-2" }]);
+	});
+
+	it("已启用成员离开目录、同系还有成员时算可能替换", () => {
+		expect(mayReplace(["m-5"], ["m-1"], ["m-1"])).toBe(true);
+	});
+
+	it("没有更新的成员、或者候选里没有这个系列时不算", () => {
+		expect(mayReplace(["m-2"], ["m-1", "m-2"], ["m-1", "m-2"])).toBe(false);
+		expect(mayReplace(["m-1"], ["n-2"], ["m-1", "n-2"])).toBe(false);
+		expect(mayReplace(["Index-Translate-35B-A3B"], ["Index-Translate-36B-A3B"], ["Index-Translate-36B-A3B"])).toBe(false);
 	});
 });
