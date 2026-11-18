@@ -17,6 +17,8 @@ export interface Catalog {
 	fetchedAt: number;
 	/** 服务返回了 Codex 格式目录，说明背后是 ChatGPT 订阅（CPA）。 */
 	codex: boolean;
+	/** 读取目录时用的服务根地址。旧版本写的缓存没有这一项，表示来源未知。 */
+	baseUrl?: string;
 	models: CatalogModel[];
 }
 
@@ -148,5 +150,5 @@ export async function fetchCatalog(
 		if (options.signal?.aborted) throw error;
 		// 多数服务不认这个参数，出错就只用普通目录。
 	}
-	return { fetchedAt: Date.now(), codex: codex !== undefined, models: mergeCatalogs(plain, codex) };
+	return { fetchedAt: Date.now(), codex: codex !== undefined, baseUrl: root, models: mergeCatalogs(plain, codex) };
 }

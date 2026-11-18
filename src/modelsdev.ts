@@ -298,6 +298,14 @@ function due(now: number): boolean {
 }
 
 /**
+ * 本进程里还没有 models.dev 数据，或者数据到了该重新下载的时候（失败后的 30 分钟内不算）。
+ * 这时模型的类型可能还不准，“每系最新”推迟到下次刷新。
+ */
+export function modelsDevPending(now = Date.now()): boolean {
+	return !data || due(now);
+}
+
+/**
  * 到期时拉取 models.dev。同一进程里同时只发一个请求，并发的调用共用同一个结果。
  * 不会失败，失败原因记在 `modelsDevStatus().error`。返回模型数据有没有变化。
  */

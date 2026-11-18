@@ -6,10 +6,10 @@
 export interface FamilyMember {
 	/** 系列名：最后一个 `/` 之前的前缀，加上去掉版本段和日期段后的名字。 */
 	family: string;
-	/** 版本号的各段数字，`6.2` 是 [6, 2]，`5-5` 也是 [5, 5]。 */
-	version: number[];
-	/** 名字里的 8 位日期，如 20250929。版本相同时才比较。 */
-	date?: number;
+	/** 版本号各段的十进制数字串，`6.2` 是 ["6", "2"]，`5-5` 也是 ["5", "5"]。 */
+	version: string[];
+	/** 日期各段的十进制数字串，如 ["20250929"]、["2024", "08", "06"]；没有日期时为空数组。版本相同时才比较。 */
+	date: string[];
 }
 
 export interface Replacement {
@@ -24,30 +24,39 @@ export interface LatestResult {
 	replacements: Replacement[];
 }
 
-/** 版本段：数字，段内可以有 `.`，可以以 `v` 开头。以 0 开头的多位数（如 `0324`、`05`）通常是日期，不算版本。 */
-const VERSION_SEGMENT = /^v?(?:0|[1-9]\d*)(?:\.\d+)*$/i;
-const DATE_SEGMENT = /^\d{8}$/;
+/** 版本段：不超过 3 位的数字，或者含 `.` 的数字，可以以 `v` 开头。 */
+const VERSION_SEGMENT = /^v?(?:\d{1,3}|\d+(?:\.\d+)+)$/i;
+/** 日期段：4 位及以上的纯数字，如 `20250929`、`0324`、`2024`。 */
+const DATE_SEGMENT = /^\d{4,}$/;
+/** 紧跟在日期段后面的 1 到 2 位数字（`2024-08-06` 里的 `08`、`06`）也算日期。 */
+const DATE_PART = /^\d{1,2}$/;
 
 /**
- * 认出模型所属的系列。名字按 `-` 拆分，第一串连续的版本段是版本，其余部分（不含 8 位日期段）是系列名。
+ * 认出模型所属的系列。名字按 `-` 拆分，日期段单独记下；剩下的段里，第一串连续的版本段是版本，其余部分是系列名。
  * 名字里没有版本段，或者只有版本段时，返回 undefined，这类模型不属于任何系列。
  */
 export function familyOf(id: string): FamilyMember | undefined {
 	const slash = id.lastIndexOf("/");
 	const prefix = id.slice(0, slash + 1);
-	let date: number | undefined;
+	const date: string[] = [];
 	const parts: string[] = [];
+	let afterDate = false;
 	for (const part of id.slice(slash + 1).split("-")) {
-		if (DATE_SEGMENT.test(part)) date = Number(part);
-		else parts.push(part);
+		if (DATE_SEGMENT.test(part) || (afterDate && DATE_PART.test(part))) {
+			date.push(part);
+			afterDate = true;
+		} else {
+			parts.push(part);
+			afterDate = false;
+		}
 	}
-	const version: number[] = [];
+	const version: string[] = [];
 	const rest: string[] = [];
 	// 只取第一串连续的版本段，后面再出现的数字段留在系列名里。
 	let state: "before" | "in" | "after" = "before";
 	for (const part of parts) {
 		if (state !== "after" && VERSION_SEGMENT.test(part)) {
-			version.push(...part.replace(/^v/i, "").split(".").map(Number));
+			version.push(...part.replace(/^v/i, "").split("."));
 			state = "in";
 		} else {
 			if (state === "in") state = "after";
@@ -58,14 +67,29 @@ export function familyOf(id: string): FamilyMember | undefined {
 	return { family: prefix + rest.join("-"), version, date };
 }
 
-/** 按数字逐段比较版本，缺的段按 0 算；版本相同且两边都有日期时比较日期。 */
-export function compareMembers(a: Pick<FamilyMember, "version" | "date">, b: Pick<FamilyMember, "version" | "date">): number {
-	const length = Math.max(a.version.length, b.version.length);
+/** 比较两个十进制数字串，不转成数字，避免很长的数字溢出。 */
+function compareDigits(a: string, b: string): number {
+	const x = a.replace(/^0+(?=\d)/, "");
+	const y = b.replace(/^0+(?=\d)/, "");
+	if (x.length !== y.length) return Math.sign(x.length - y.length);
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/** 逐段比较，缺的段按 0 算。 */
+function compareSegments(a: readonly string[], b: readonly string[]): number {
+	const length = Math.max(a.length, b.length);
 	for (let index = 0; index < length; index++) {
-		const diff = (a.version[index] ?? 0) - (b.version[index] ?? 0);
-		if (diff !== 0) return Math.sign(diff);
+		const diff = compareDigits(a[index] ?? "0", b[index] ?? "0");
+		if (diff !== 0) return diff;
 	}
-	if (a.date !== undefined && b.date !== undefined) return Math.sign(a.date - b.date);
+	return 0;
+}
+
+/** 按数字逐段比较版本；版本相同且两边都有日期时比较日期，只有一边有日期时算作相同。 */
+export function compareMembers(a: Pick<FamilyMember, "version" | "date">, b: Pick<FamilyMember, "version" | "date">): number {
+	const byVersion = compareSegments(a.version, b.version);
+	if (byVersion !== 0) return byVersion;
+	if (a.date.length && b.date.length) return compareSegments(a.date, b.date);
 	return 0;
 }
 
@@ -93,35 +117,47 @@ function groupByFamily(ids: readonly string[]): Map<string, Entry[]> {
 function newest(entries: Entry[]): { top: Entry[]; best: Pick<FamilyMember, "version" | "date"> } {
 	let version = entries[0].member.version;
 	for (const entry of entries) {
-		if (compareMembers({ version: entry.member.version }, { version }) > 0) version = entry.member.version;
+		if (compareSegments(entry.member.version, version) > 0) version = entry.member.version;
 	}
-	const tied = entries.filter((entry) => compareMembers({ version: entry.member.version }, { version }) === 0);
-	const dates = tied.map((entry) => entry.member.date).filter((date): date is number => date !== undefined);
-	const date = dates.length ? Math.max(...dates) : undefined;
-	return { top: tied.filter((entry) => entry.member.date === undefined || entry.member.date === date), best: { version, date } };
+	const tied = entries.filter((entry) => compareSegments(entry.member.version, version) === 0);
+	let date: string[] = [];
+	for (const entry of tied) {
+		if (entry.member.date.length && (!date.length || compareSegments(entry.member.date, date) > 0)) date = entry.member.date;
+	}
+	const top = tied.filter((entry) => !entry.member.date.length || compareSegments(entry.member.date, date) === 0);
+	return { top, best: { version, date } };
 }
 
 /**
- * 在每个已有启用成员的系列里，启用候选模型中的最新版，停用比它旧的已启用成员（包括目录里已经没有的 id）。
- * - 候选模型里没有这个系列的成员时不动。
- * - 已启用的成员里有不比最新版旧的（例如目录里隐藏了的同版本或更新的模型）、且最新版都没启用时不动，免得降级。
- * - 不属于任何系列的模型不动。
+ * 在每个已有启用成员的系列里，启用候选模型中的最新版，停用被它取代的已启用成员。
+ * - `candidates`：可以被选为新版的模型（目录里没有隐藏的对话模型）。
+ * - `catalog`：目录里的全部模型 id，用来判断已启用的 id 是否已经从目录里消失。
+ *
+ * 被取代的成员：比最新版旧的，以及和最新版同版本、但已经不在目录里的（如别名 `claude-sonnet-4-5` 消失、
+ * 只剩 `claude-sonnet-4-5-20250929`）。目录里还在的同版本多个 id 都保留。
+ * 已启用的成员里有不能被取代、又不是最新版的（比最新版还新，或者同版本但在目录里被隐藏），而最新版都没启用时，
+ * 整个系列不动，免得降级。候选里没有这个系列的成员、以及不属于任何系列的模型都不动。
  */
-export function pickLatest(enabled: readonly string[], candidates: readonly string[]): LatestResult {
+export function pickLatest(enabled: readonly string[], candidates: readonly string[], catalog: readonly string[]): LatestResult {
 	const candidateFamilies = groupByFamily(candidates);
+	const inCatalog = new Set(catalog);
 	const remove = new Map<string, string>();
 	for (const [family, current] of groupByFamily(enabled)) {
 		const members = candidateFamilies.get(family);
 		if (!members) continue;
 		const { top, best } = newest(members);
 		const kept = current.filter((entry) => top.some((item) => item.id === entry.id));
+		const superseded = current.filter((entry) => {
+			if (kept.includes(entry)) return false;
+			const order = compareMembers(entry.member, best);
+			return order < 0 || (order === 0 && !inCatalog.has(entry.id));
+		});
+		if (superseded.length === 0) continue;
 		let target: string;
 		if (kept.length) target = kept[0].id;
-		else if (current.some((entry) => compareMembers(entry.member, best) >= 0)) continue;
+		else if (superseded.length < current.length) continue;
 		else target = top[0].id;
-		for (const entry of current) {
-			if (!kept.includes(entry) && compareMembers(entry.member, best) < 0) remove.set(entry.id, target);
-		}
+		for (const entry of superseded) remove.set(entry.id, target);
 	}
 	if (remove.size === 0) return { enabled: [...enabled], replacements: [] };
 	const next: string[] = [];

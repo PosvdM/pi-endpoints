@@ -162,8 +162,14 @@ describe("管理页的操作", () => {
 
 	it("打开“每系最新”后立刻调整并返回状态，之后刷新目录时自动换成新版", async () => {
 		let ids = ["gpt-6-sol", "gpt-6.1-sol"];
+		// models.dev 没有数据时“每系最新”会推迟，这里给它一份能用的数据。
+		const modelsDev = { moonshotai: { id: "moonshotai", models: { "kimi-k9": { limit: { context: 1000, output: 100 } } } } };
 		vi.stubGlobal("fetch", async (url: string) =>
-			new Response(JSON.stringify(url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) })),
+			new Response(
+				JSON.stringify(
+					url === MODELS_DEV_URL ? modelsDev : url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) },
+				),
+			),
 		);
 		await call("/api/saveService", { service: { name: "relay", baseUrl: "https://relay.test" } });
 		await call("/api/setKey", { name: "relay", apiKey: "sk-1" });

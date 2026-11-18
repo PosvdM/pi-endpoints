@@ -196,18 +196,11 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 }
 
 /**
- * 刷新服务目录，成功时按“每系最新”调整启用的模型，再在需要时更新 models.dev 并等它完成（最多 60 秒）。
+ * 刷新服务目录，等 models.dev 更新完（最多 60 秒），目录刷新成功时再按“每系最新”调整启用的模型。
  * models.dev 失败不算刷新失败，原因在状态的 `modelsDev.error` 里。
  */
 async function refreshService(endpoints: Endpoints, name: string) {
-	let refreshError: string | undefined;
-	try {
-		await endpoints.refreshAndApply(name);
-		endpoints.register(name);
-	} catch (error) {
-		refreshError = describeError(error);
-	}
-	await endpoints.updateModelsDev();
+	const refreshError = await endpoints.refreshForPage(name);
 	return refreshError === undefined ? undefined : { ...state(endpoints), refreshError };
 }
 

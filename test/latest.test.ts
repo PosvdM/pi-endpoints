@@ -1,15 +1,25 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Endpoints } from "../src/endpoints.ts";
-import { setModelsDevForTest } from "../src/modelsdev.ts";
-import { fakePi, useTempAgentDir } from "./helpers.ts";
+import { MODELS_DEV_URL, setModelsDevForTest } from "../src/modelsdev.ts";
+import { useTempAgentDir } from "./helpers.ts";
 
 let temp: ReturnType<typeof useTempAgentDir>;
+
+const devModels = { typesafe: { "jev-test-2": { type: "decision" } } };
+const writeModelsDev = () =>
+	writeFileSync(
+		join(temp.dir, "endpoints-modelsdev.json"),
+		JSON.stringify({ version: 1, fetchedAt: Date.now(), checkedAt: Date.now(), providers: devModels }),
+	);
 
 beforeEach(() => {
 	temp = useTempAgentDir();
 	setModelsDevForTest(undefined);
+	// 默认 models.dev 数据已经就绪；冷缓存的用例自己删掉这个文件。
+	writeModelsDev();
 });
 
 afterEach(() => {
@@ -20,54 +30,98 @@ afterEach(() => {
 const configFile = () => join(temp.dir, "endpoints.json");
 const settingsFile = () => join(temp.dir, "settings.json");
 const readConfig = () => JSON.parse(readFileSync(configFile(), "utf8"));
-const signal = () => new AbortController().signal;
+const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
 
-/** 服务目录返回 `ids()` 里的模型；`hidden` 里的模型在 Codex 目录里标为隐藏。 */
-function stubCatalog(ids: () => string[], hidden: string[] = []) {
-	vi.stubGlobal("fetch", async (url: string) =>
-		new Response(
-			JSON.stringify(
-				url.includes("client_version")
-					? { models: ids().map((slug) => ({ slug, visibility: hidden.includes(slug) ? "hide" : "list" })) }
-					: { data: ids().map((id) => ({ id, owned_by: "openai" })) },
-			),
-		),
-	);
+type Catalogs = Record<string, { ids: string[]; hidden?: string[]; gate?: Promise<void> }>;
+
+/** 按主机名返回目录，`gate` 没放行前挂起请求（会响应 abort）。models.dev 返回 `devModels`。 */
+function stubNetwork(catalogs: Catalogs) {
+	vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+		if (url === MODELS_DEV_URL) {
+			const v2 = Object.fromEntries(Object.entries(devModels).map(([provider, models]) => [provider, { id: provider, models }]));
+			return Promise.resolve(new Response(JSON.stringify(v2)));
+		}
+		const entry = catalogs[new URL(url).hostname];
+		if (!entry) return Promise.resolve(new Response("not found", { status: 404 }));
+		const body = url.includes("client_version")
+			? { models: entry.ids.map((slug) => ({ slug, visibility: entry.hidden?.includes(slug) ? "hide" : "list" })) }
+			: { data: entry.ids.map((id) => ({ id, owned_by: "openai" })) };
+		return new Promise<Response>((resolve, reject) => {
+			init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+			void (entry.gate ?? Promise.resolve()).then(() => resolve(new Response(JSON.stringify(body))));
+		});
+	});
 }
 
-/** 和 pi 一样：注册服务商后以 allowNetwork: false 调用 refreshModels。 */
-function reentrantPi() {
-	const fake = fakePi();
+/**
+ * 模仿 pi 1.3 的模型运行时：每个服务商的刷新带一个代号，开始新的刷新时取消同一服务商进行中的刷新；
+ * 注册或注销服务商会让所有服务商做一次离线刷新。被取消的刷新不发布结果。
+ */
+function fakeRuntime() {
+	const providers = new Map<string, ProviderConfig>();
+	const controllers = new Map<string, AbortController>();
+	const published = new Map<string, string[]>();
 	let registrations = 0;
-	const register = fake.pi.registerProvider;
-	fake.pi.registerProvider = ((name: string, config: Parameters<typeof register>[1]) => {
-		registrations++;
-		register(name, config);
-		void config.refreshModels?.({ allowNetwork: false, signal: signal() } as never);
-	}) as typeof register;
-	return { ...fake, registrations: () => registrations };
+	async function refreshOne(name: string, allowNetwork: boolean): Promise<"published" | "superseded" | "failed"> {
+		controllers.get(name)?.abort();
+		const controller = new AbortController();
+		controllers.set(name, controller);
+		try {
+			const models = await providers.get(name)?.refreshModels?.({ allowNetwork, signal: controller.signal } as never);
+			if (controller.signal.aborted) return "superseded";
+			published.set(name, (models ?? []).map((model) => model.id));
+			return "published";
+		} catch {
+			return controller.signal.aborted ? "superseded" : "failed";
+		}
+	}
+	const offlineAll = () => {
+		for (const name of providers.keys()) void refreshOne(name, false);
+	};
+	const pi = {
+		registerProvider: (name: string, config: ProviderConfig) => {
+			registrations++;
+			providers.set(name, config);
+			offlineAll();
+		},
+		unregisterProvider: (name: string) => {
+			providers.delete(name);
+			offlineAll();
+		},
+	} as unknown as ExtensionAPI;
+	return {
+		pi,
+		providers,
+		published,
+		registrations: () => registrations,
+		/** 像 pi 启动后那样，同一批联网刷新所有服务商。 */
+		refreshAll: (names: string[]) => Promise.all(names.map((name) => refreshOne(name, true))),
+	};
 }
 
-/** 建一个有密钥、已读过目录的服务。 */
-async function setup(enabled: string[], catalog: string[], options: { on?: boolean; hidden?: string[] } = {}) {
-	let ids = catalog;
-	stubCatalog(() => ids, options.hidden);
-	const fake = reentrantPi();
-	const endpoints = new Endpoints(fake.pi);
-	endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled, overrides: {} });
+/** 建一个有密钥、已读过目录的服务 cpa。 */
+async function setup(enabled: string[], ids: string[], options: { on?: boolean; preset?: boolean; hidden?: string[] } = {}) {
+	const catalogs: Catalogs = { "cpa.test": { ids, hidden: options.hidden } };
+	stubNetwork(catalogs);
+	const runtime = fakeRuntime();
+	const endpoints = new Endpoints(runtime.pi);
+	// preset：配置里直接写上开关，不经过 setLatestPerFamily()，也就不会先拉 models.dev。
+	endpoints.saveService({ name: "cpa", baseUrl: "https://cpa.test", enabled, overrides: {}, latestPerFamily: options.preset || undefined });
 	endpoints.setKey("cpa", "k");
 	await endpoints.refresh("cpa");
 	if (options.on) await endpoints.setLatestPerFamily("cpa", true);
-	return { ...fake, endpoints, setCatalog: (next: string[]) => (ids = next) };
+	return { ...runtime, endpoints, catalogs, refreshModels: () => runtime.refreshAll(["cpa"]) };
 }
 
 describe("每系最新", () => {
-	it("开启时立即按缓存的目录调整，保留旧 id 的手动设置，关闭时去掉字段", async () => {
-		const { endpoints, providers } = await setup(["gpt-6.1-sol", "other"], ["gpt-6.1-sol", "gpt-6.2-sol", "other"]);
+	it("开启时立即按缓存的目录调整，开关和启用列表一起保存、只注册一次，保留旧 id 的手动设置", async () => {
+		const { endpoints, providers, registrations } = await setup(["gpt-6.1-sol", "other"], ["gpt-6.1-sol", "gpt-6.2-sol", "other"]);
 		endpoints.setOverride("cpa", "gpt-6.1-sol", { contextWindow: 1000 });
 		expect(readConfig().services[0].latestPerFamily).toBeUndefined();
 
+		const before = registrations();
 		await endpoints.setLatestPerFamily("cpa", true);
+		expect(registrations()).toBe(before + 1);
 		const saved = readConfig().services[0];
 		expect(saved).toMatchObject({ latestPerFamily: true, enabled: ["gpt-6.2-sol", "other"], overrides: { "gpt-6.1-sol": { contextWindow: 1000 } } });
 		expect(saved.overrides["gpt-6.2-sol"]).toBeUndefined();
@@ -82,77 +136,145 @@ describe("每系最新", () => {
 	});
 
 	it("没开启时刷新目录不调整", async () => {
-		const { providers } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
-		await providers.get("cpa")?.refreshModels?.({ allowNetwork: true, signal: signal() } as never);
+		const { endpoints, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"]);
+		await refreshModels();
+		await endpoints.refreshForPage("cpa");
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 	});
 
-	it("refreshModels 刷新出新版本后换掉目录里已经没有的旧 id，返回新模型，不会循环", async () => {
-		const { providers, setCatalog, registrations } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
-		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
-		setCatalog(["gpt-6.2-sol"]);
+	it("refreshModels 只保存结果、返回新模型由 pi 发布，不重新注册；换掉目录里已经没有的旧 id", async () => {
+		const { endpoints, catalogs, published, registrations, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		catalogs["cpa.test"].ids = ["gpt-6.2-sol"];
+		const notes: string[] = [];
+		endpoints.notify = (message) => notes.push(message);
 		const before = registrations();
-		const models = await providers.get("cpa")?.refreshModels?.({ allowNetwork: true, signal: signal() } as never);
-		expect(models?.map((model) => model.id)).toEqual(["gpt-6.2-sol"]);
+		expect(await refreshModels()).toEqual(["published"]);
+		expect(published.get("cpa")).toEqual(["gpt-6.2-sol"]);
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.2-sol"]);
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.2-sol"]);
+		await tick();
+		expect(registrations()).toBe(before);
+		expect(notes).toEqual(["cpa：gpt-6.1-sol → gpt-6.2-sol。当前会话请用 /model 切换"]);
+	});
+
+	it("同一批刷新里，快的服务换了模型也不会取消慢的服务的联网刷新", async () => {
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		const catalogs: Catalogs = { "fast.test": { ids: ["gpt-6.1-sol"] }, "slow.test": { ids: ["m-1"] } };
+		stubNetwork(catalogs);
+		const runtime = fakeRuntime();
+		const endpoints = new Endpoints(runtime.pi);
+		for (const [name, enabled] of [["fast", "gpt-6.1-sol"], ["slow", "m-1"]]) {
+			endpoints.saveService({ name, baseUrl: `https://${name}.test`, enabled: [enabled], overrides: {} });
+			endpoints.setKey(name, "k");
+			await endpoints.refresh(name);
+			await endpoints.setLatestPerFamily(name, true);
+		}
+		catalogs["fast.test"].ids = ["gpt-6.2-sol"];
+		catalogs["slow.test"] = { ids: ["m-1", "m-2"], gate };
+		const batch = runtime.refreshAll(["fast", "slow"]);
+		await tick();
+		expect(readConfig().services[0].enabled).toEqual(["gpt-6.2-sol"]);
+		release();
+		expect(await batch).toEqual(["published", "published"]);
+		expect(runtime.published.get("fast")).toEqual(["gpt-6.2-sol"]);
+		expect(runtime.published.get("slow")).toEqual(["m-2"]);
+		expect(endpoints.catalog("slow")?.models.map((model) => model.id)).toEqual(["m-1", "m-2"]);
+	});
+
+	it("管理页刷新时只注册最终结果一次", async () => {
+		const { endpoints, catalogs, registrations, providers } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		const before = registrations();
+		expect(await endpoints.refreshForPage("cpa")).toBeUndefined();
 		expect(registrations()).toBe(before + 1);
+		expect(providers.get("cpa")?.models?.map((model) => model.id)).toEqual(["gpt-6.2-sol"]);
 	});
 
 	it("刷新失败时不调整", async () => {
-		const { endpoints, providers } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		const { endpoints, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
 		// 缓存里已经有新版本，但这次刷新失败，不按缓存调整。
 		writeFileSync(
 			join(temp.dir, "endpoints-cache.json"),
-			JSON.stringify({ cpa: { fetchedAt: 1, codex: false, models: [{ id: "gpt-6.1-sol" }, { id: "gpt-6.2-sol" }] } }),
+			JSON.stringify({ cpa: { fetchedAt: 1, codex: false, baseUrl: "https://cpa.test", models: [{ id: "gpt-6.1-sol" }, { id: "gpt-6.2-sol" }] } }),
 		);
 		vi.stubGlobal("fetch", async () => new Response("down", { status: 503 }));
-		await expect(providers.get("cpa")?.refreshModels?.({ allowNetwork: true, signal: signal() } as never)).rejects.toThrow();
-		await expect(endpoints.refreshAndApply("cpa")).rejects.toThrow();
+		expect(await refreshModels()).toEqual(["failed"]);
+		expect(await endpoints.refreshForPage("cpa")).toContain("down");
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 	});
 
-	it("没有变化时不写配置文件", async () => {
-		const { endpoints } = await setup(["gpt-6.2-sol", "Index-Translate-35B-A3B"], ["gpt-6.1-sol", "gpt-6.2-sol", "claude-opus-5-5"], { on: true });
-		// 换成紧凑格式，保存过就会变回缩进格式。
-		const compact = JSON.stringify(readConfig());
+	it("没有变化时不写配置文件，也不把别的 pi 写入的配置换进内存", async () => {
+		const { endpoints, refreshModels } = await setup(["gpt-6.2-sol", "Index-Translate-35B-A3B"], ["gpt-6.1-sol", "gpt-6.2-sol", "claude-opus-5-5"], { on: true });
+		// 另一个 pi 加了服务 b，并换成紧凑格式写入；保存过就会变回缩进格式。
+		const config = readConfig();
+		config.services.push({ name: "b", baseUrl: "https://b.test", enabled: [], overrides: {} });
+		const compact = JSON.stringify(config);
 		writeFileSync(configFile(), compact);
-		expect(await endpoints.refreshAndApply("cpa").then(() => readFileSync(configFile(), "utf8"))).toBe(compact);
-		expect(await endpoints.applyLatestPerFamily("cpa")).toEqual([]);
+		await refreshModels();
+		await endpoints.refreshForPage("cpa");
 		expect(readFileSync(configFile(), "utf8")).toBe(compact);
+		expect(endpoints.service("b")).toBeUndefined();
 	});
 
 	it("隐藏模型不算新版本", async () => {
 		const { endpoints } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"], { on: true, hidden: ["gpt-6.2-sol"] });
 		expect(endpoints.models("cpa").find((model) => model.id === "gpt-6.2-sol")?.hidden).toBe(true);
-		await endpoints.refreshAndApply("cpa");
+		await endpoints.refreshForPage("cpa");
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 	});
 
-	it("models.dev 标为非对话的模型不算新版本", async () => {
-		writeFileSync(
-			join(temp.dir, "endpoints-modelsdev.json"),
-			JSON.stringify({ version: 1, fetchedAt: Date.now(), checkedAt: Date.now(), providers: { typesafe: { "jev-test-2": { type: "decision" } } } }),
-		);
+	it("models.dev 标为非对话的模型不算新版本；查不到的模型按对话模型处理", async () => {
 		const { endpoints } = await setup(["jev-test-1"], ["jev-test-1", "jev-test-2"], { on: true });
 		expect(endpoints.models("cpa").find((model) => model.id === "jev-test-2")?.modelType).toBe("decision");
 		expect(readConfig().services[0].enabled).toEqual(["jev-test-1"]);
 	});
 
+	it("models.dev 数据已就绪、只是查不到的模型按对话模型处理", async () => {
+		const { endpoints } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "gpt-6.2-sol"], { on: true });
+		expect(endpoints.models("cpa").find((model) => model.id === "gpt-6.2-sol")).toMatchObject({ modelsDev: undefined, modelType: undefined });
+		expect(readConfig().services[0].enabled).toEqual(["gpt-6.2-sol"]);
+	});
+
+	it("models.dev 还没有数据时推迟到下次刷新；管理页刷新等 models.dev 拉完后执行", async () => {
+		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+		const { endpoints, catalogs, refreshModels } = await setup(["jev-test-1"], ["jev-test-1"], { preset: true });
+		catalogs["cpa.test"].ids = ["jev-test-1", "jev-test-2", "jev-test-3"];
+		await refreshModels();
+		expect(readConfig().services[0].enabled).toEqual(["jev-test-1"]);
+		// 后台拉完 models.dev 后，下次刷新才换，而且不会换成非对话模型 jev-test-2。
+		await endpoints.updateModelsDev();
+		await refreshModels();
+		expect(readConfig().services[0].enabled).toEqual(["jev-test-3"]);
+	});
+
+	it("管理页刷新在冷缓存时先等 models.dev", async () => {
+		rmSync(join(temp.dir, "endpoints-modelsdev.json"));
+		const { endpoints, catalogs } = await setup(["jev-test-1"], ["jev-test-1"], { preset: true });
+		catalogs["cpa.test"].ids = ["jev-test-1", "jev-test-2", "jev-test-3"];
+		await endpoints.refreshForPage("cpa");
+		expect(endpoints.models("cpa").find((model) => model.id === "jev-test-2")?.modelType).toBe("decision");
+		expect(readConfig().services[0].enabled).toEqual(["jev-test-3"]);
+	});
+
+	it("旧版本写的缓存没有来源地址时不调整", async () => {
+		const { endpoints } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		writeFileSync(join(temp.dir, "endpoints-cache.json"), JSON.stringify({ cpa: { fetchedAt: 1, codex: false, models: [{ id: "gpt-6.2-sol" }] } }));
+		await endpoints.setLatestPerFamily("cpa", true);
+		expect(readConfig().services[0]).toMatchObject({ latestPerFamily: true, enabled: ["gpt-6.1-sol"] });
+	});
+
 	it("基于重新读取的配置修改，不覆盖别的 pi 刚写入的内容", async () => {
-		const { endpoints } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "other"], { on: true });
+		const { endpoints, catalogs } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol", "other"], { on: true });
 		let release: () => void = () => {};
-		const gate = new Promise<void>((resolve) => (release = resolve));
-		vi.stubGlobal("fetch", async (url: string) => {
-			await gate;
-			return new Response(JSON.stringify(url.includes("client_version") ? {} : { data: [{ id: "gpt-6.1-sol" }, { id: "gpt-6.2-sol" }, { id: "other" }] }));
-		});
+		catalogs["cpa.test"] = { ids: ["gpt-6.1-sol", "gpt-6.2-sol", "other"], gate: new Promise<void>((resolve) => (release = resolve)) };
+		const pending = endpoints.refreshForPage("cpa");
+		await tick();
 		// 另一个 pi 启用了 other，又加了一个服务。这个 pi 内存里的配置还是旧的。
-		const other = new Endpoints(fakePi().pi);
+		const other = new Endpoints(fakeRuntime().pi);
 		other.setEnabled("cpa", "other", true);
 		other.saveService({ name: "b", baseUrl: "https://b.test", enabled: [], overrides: {} });
 		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.1-sol"]);
-		const pending = endpoints.refreshAndApply("cpa");
 		release();
 		await pending;
 		const saved = readConfig();
@@ -160,18 +282,51 @@ describe("每系最新", () => {
 		expect(saved.services[0].enabled).toEqual(["gpt-6.2-sol", "other"]);
 	});
 
-	it("刷新期间服务换了地址时不调整", async () => {
-		const { endpoints } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+	it("请求挂起期间另一个 pi 改了服务地址时不调整", async () => {
+		const { endpoints, catalogs } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
 		let release: () => void = () => {};
-		const gate = new Promise<void>((resolve) => (release = resolve));
-		vi.stubGlobal("fetch", async (url: string) => {
-			await gate;
-			return new Response(JSON.stringify(url.includes("client_version") ? {} : { data: [{ id: "gpt-6.2-sol" }] }));
-		});
-		const pending = endpoints.refreshAndApply("cpa");
+		catalogs["cpa.test"] = { ids: ["gpt-6.2-sol"], gate: new Promise<void>((resolve) => (release = resolve)) };
+		const pending = endpoints.refreshForPage("cpa");
+		await tick();
+		const other = new Endpoints(fakeRuntime().pi);
+		other.saveService({ name: "cpa", baseUrl: "https://new.test" } as never, "cpa");
+		release();
+		await pending;
+		expect(readConfig().services[0]).toMatchObject({ baseUrl: "https://new.test", enabled: ["gpt-6.1-sol"] });
+	});
+
+	it("刷新期间这个 pi 改了服务地址时不调整", async () => {
+		const { endpoints, catalogs } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		let release: () => void = () => {};
+		catalogs["cpa.test"] = { ids: ["gpt-6.2-sol"], gate: new Promise<void>((resolve) => (release = resolve)) };
+		const pending = endpoints.refreshForPage("cpa");
+		await tick();
 		endpoints.saveService({ name: "cpa", baseUrl: "https://new.test" } as never, "cpa");
 		release();
 		await pending;
+		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
+	});
+
+	it("配置文件损坏时刷新照常返回，记下原因，内存里的配置、密钥和缓存不变", async () => {
+		const { endpoints, catalogs, published, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		writeFileSync(configFile(), "{ broken");
+		expect(await refreshModels()).toEqual(["published"]);
+		expect(published.get("cpa")).toEqual(["gpt-6.1-sol"]);
+		expect(endpoints.loadError).toContain("endpoints.json");
+		expect(endpoints.service("cpa")?.enabled).toEqual(["gpt-6.1-sol"]);
+		expect(endpoints.keySource("cpa")).toBe("file");
+		expect(readFileSync(configFile(), "utf8")).toBe("{ broken");
+	});
+
+	it("密钥文件损坏时刷新照常返回，不调整，内存里的密钥不变", async () => {
+		const { endpoints, catalogs, published, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"], { on: true });
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		writeFileSync(join(temp.dir, "endpoints-auth.json"), "{ broken");
+		expect(await refreshModels()).toEqual(["published"]);
+		expect(published.get("cpa")).toEqual(["gpt-6.1-sol"]);
+		expect(endpoints.loadError).toContain("endpoints-auth.json");
+		expect(endpoints.apiKey("cpa")).toBe("k");
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 	});
 
@@ -187,10 +342,13 @@ describe("每系最新", () => {
 			expect(readSettings()).toEqual({ defaultProvider: "cpa", defaultModel: "gpt-6.2-sol", enabledModels: ["x/a", "cpa/gpt-6.2-sol", "cpa/gpt-*"], theme: "dark" });
 		});
 
-		it("新版已经在列表里时只删旧的；默认模型属于别的服务商时不动", async () => {
-			writeFileSync(settingsFile(), JSON.stringify({ defaultProvider: "other", defaultModel: "gpt-6.1-sol", enabledModels: ["cpa/gpt-6.1-sol", "cpa/gpt-6.2-sol"] }));
+		it("新版已经在列表里时只删旧的；默认模型属于别的服务商时不动；大小写不同的项不改", async () => {
+			writeFileSync(
+				settingsFile(),
+				JSON.stringify({ defaultProvider: "other", defaultModel: "gpt-6.1-sol", enabledModels: ["cpa/gpt-6.1-sol", "cpa/GPT-6.1-sol", "cpa/gpt-6.2-sol"] }),
+			);
 			await setup(["gpt-6.1-sol"], ["gpt-6.2-sol"], { on: true });
-			expect(readSettings()).toEqual({ defaultProvider: "other", defaultModel: "gpt-6.1-sol", enabledModels: ["cpa/gpt-6.2-sol"] });
+			expect(readSettings()).toEqual({ defaultProvider: "other", defaultModel: "gpt-6.1-sol", enabledModels: ["cpa/GPT-6.1-sol", "cpa/gpt-6.2-sol"] });
 		});
 
 		it("enabledModels 不是数组时不动它，照样换默认模型", async () => {

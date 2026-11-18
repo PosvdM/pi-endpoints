@@ -21,8 +21,8 @@ import {
 	type ServiceConfig,
 } from "./config.ts";
 import { replaceModels } from "./defaults.ts";
-import { pickLatest, type Replacement } from "./family.ts";
-import { loadModelsDev, updateModelsDev } from "./modelsdev.ts";
+import { type LatestResult, pickLatest, type Replacement } from "./family.ts";
+import { loadModelsDev, modelsDevPending, updateModelsDev } from "./modelsdev.ts";
 import { isChatModel, PI_LEVELS, type ResolvedModel, resolveModel, resolveService, type Source, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
 
 export interface ServiceStatus {
@@ -60,8 +60,13 @@ export class Endpoints {
 	private registered = new Set<string>();
 	/** 每个已注册服务里各模型的附加 Anthropic beta，注册和刷新目录时更新。 */
 	private betas = new Map<string, Map<string, string[]>>();
-	/** 正在进行的 models.dev 更新，并发的调用共用它，拿到新数据后只重新注册一次。 */
-	private modelsDevTask?: Promise<void>;
+	/**
+	 * 正在进行的 models.dev 更新，并发的调用共用它。`register` 为真时拿到新数据后由它重新注册一次；
+	 * 管理页的刷新自己在最后注册，传入假。
+	 */
+	private modelsDevTask?: { promise: Promise<boolean>; register: boolean };
+	/** “每系最新”换掉模型后，在 pi 的界面上提示一句。由插件入口设置，拿不到界面时为空。 */
+	notify?: (message: string) => void;
 	private readonly pi: ExtensionAPI;
 
 	constructor(pi: ExtensionAPI) {
@@ -76,9 +81,13 @@ export class Endpoints {
 	}
 
 	private reload(): void {
-		this.config = loadConfig();
-		this.auth = loadAuth();
-		this.cache = loadCache();
+		this.commit(readFiles());
+	}
+
+	private commit(files: Files): void {
+		this.config = files.config;
+		this.auth = files.auth;
+		this.cache = files.cache;
 		this.loadError = undefined;
 	}
 
@@ -155,11 +164,15 @@ export class Endpoints {
 			refreshModels: async (context) => {
 				if (context.allowNetwork) {
 					try {
-						await this.refreshAndApply(name, context.signal);
+						await this.refresh(name, context.signal);
 					} finally {
 						// 在后台更新 models.dev，不拖慢启动。拿到新数据后会重新注册所有服务。
 						void this.updateModelsDev();
 					}
+					// 这里只保存“每系最新”的结果，新的模型列表由下面返回给 pi 发布，不重新注册：
+					// pi 重新注册服务商时会取消它正在进行的刷新，并让所有服务商做一次离线刷新，同一批里还没返回的服务就跳过了这轮联网刷新。
+					const replacements = this.migrateFromFiles(name);
+					if (replacements.length) await this.afterMigration(name, replacements);
 				}
 				const current = this.service(name);
 				return current ? this.piModels(name, this.enabledModels(current)) : [];
@@ -193,17 +206,26 @@ export class Endpoints {
 	 * 是否到期（24 小时、失败后 30 分钟）由 `updateModelsDev()` 判断。
 	 */
 	updateModelsDev(): Promise<void> {
-		if (this.modelsDevTask) return this.modelsDevTask;
-		if (!this.needsModelsDev()) return Promise.resolve();
-		this.modelsDevTask = updateModelsDev()
+		return this.fetchModelsDev(true).then(() => {});
+	}
+
+	/** 需要时更新 models.dev，返回数据有没有变化。`register` 为假时不重新注册，由调用方负责。 */
+	private fetchModelsDev(register: boolean): Promise<boolean> {
+		if (this.modelsDevTask) {
+			this.modelsDevTask.register ||= register;
+			return this.modelsDevTask.promise;
+		}
+		if (!this.needsModelsDev()) return Promise.resolve(false);
+		const task = { register, promise: Promise.resolve(false) };
+		task.promise = updateModelsDev()
+			.catch(() => false)
 			.then((changed) => {
-				if (changed) this.registerAll();
-			})
-			.catch(() => {})
-			.finally(() => {
 				this.modelsDevTask = undefined;
+				if (changed && task.register) this.registerAll();
+				return changed;
 			});
-		return this.modelsDevTask;
+		this.modelsDevTask = task;
+		return task.promise;
 	}
 
 	/** 刷新一个服务的目录并写缓存，失败时保留旧缓存。不负责重新注册。 */
@@ -235,47 +257,74 @@ export class Endpoints {
 	}
 
 	/**
-	 * 刷新目录；成功并写入缓存后，按“每系最新”调整启用的模型。刷新失败时抛出错误，不调整。
-	 * 调整了模型时会重新注册所有服务，否则不负责重新注册。
+	 * 管理页的刷新：刷新目录，等 models.dev 更新完（最多 60 秒），目录刷新成功时再执行“每系最新”，最后只注册一次。
+	 * 返回目录刷新失败的原因；models.dev 失败不算刷新失败。
 	 */
-	async refreshAndApply(name: string, signal?: AbortSignal): Promise<Catalog> {
-		const service = this.service(name);
-		const catalog = await this.refresh(name, signal);
-		// 请求期间服务被删除、改名或换了地址时，refresh() 没有写缓存，这里也不调整。
-		if (service && this.isCurrent(service)) await this.applyLatestPerFamily(name, service.baseUrl);
-		return catalog;
+	async refreshForPage(name: string): Promise<string | undefined> {
+		let refreshError: string | undefined;
+		try {
+			await this.refresh(name);
+		} catch (error) {
+			refreshError = describeError(error);
+		}
+		const modelsDevChanged = await this.fetchModelsDev(false);
+		const replacements = refreshError === undefined ? this.migrateFromFiles(name) : [];
+		if (modelsDevChanged || replacements.length) this.registerAll();
+		else if (refreshError === undefined) this.register(name);
+		if (replacements.length) await this.afterMigration(name, replacements);
+		return refreshError;
 	}
 
 	/**
-	 * 服务开启了 `latestPerFamily` 时，按缓存的目录在每个已启用的系列里只保留最新版（规则见 `pickLatest()`）。
-	 * 候选只取目录里没有隐藏的对话模型。有变化时保存配置、重新注册，再把 pi 设置里的旧模型换成新版；
-	 * 没有变化时不写文件。不会失败：配置文件损坏时不调整，pi 设置读写不了时跳过那一步。
-	 * 带 `baseUrl` 时，重新读到的服务地址和它不同就不调整，缓存里的目录未必属于新地址。
+	 * 按“每系最新”算出服务的新启用列表，没有变化或要推迟时返回 undefined。规则见 `pickLatest()`。
+	 * - 目录缓存的来源地址未知（旧版本写的缓存）或和服务地址不同时跳过，目录可能属于旧地址。
+	 * - models.dev 还没有数据或到了该下载的时候、并且会去下载时推迟：类型未知的模型按对话模型处理，可能换成后来才判定为非对话的模型。
+	 *   不会去下载时（没有模型要靠它补参数）按现有数据判断，和注册一致。
 	 */
-	async applyLatestPerFamily(name: string, baseUrl?: string): Promise<Replacement[]> {
+	private planLatest(service: ServiceConfig, catalog: Catalog | undefined): LatestResult | undefined {
+		if (!service.latestPerFamily || serviceProblem(service) || !catalog?.baseUrl || catalog.baseUrl !== service.baseUrl) return undefined;
+		if (modelsDevPending() && this.needsModelsDev()) return undefined;
+		const models = catalog.models.map((model) => resolveModel(service, model, catalog));
+		const candidates = models.filter((model) => !model.hidden && isChatModel(model)).map((model) => model.id);
+		const result = pickLatest(service.enabled, candidates, catalog.models.map((model) => model.id));
+		return result.replacements.length ? result : undefined;
+	}
+
+	/**
+	 * 目录刷新成功后执行“每系最新”。在重新读取的文件快照上计算，确实有变化时才把快照换进内存、保存配置；
+	 * 没有变化时不写文件，也不替换内存里的状态，刷新不会变成一次隐式的重新加载。不重新注册，由调用方负责。
+	 * 文件读不了时只记下原因，内存里的配置、密钥和缓存保持原样。
+	 */
+	private migrateFromFiles(name: string): Replacement[] {
+		let files: Files;
 		try {
-			this.beginChange();
-		} catch {
+			files = readFiles();
+		} catch (error) {
+			this.loadError = describeError(error);
 			return [];
 		}
-		const service = this.service(name);
-		const catalog = this.cache[name];
-		if (!service?.latestPerFamily || !catalog || (baseUrl !== undefined && service.baseUrl !== baseUrl)) return [];
-		const candidates = catalog.models
-			.map((model) => resolveModel(service, model, catalog))
-			.filter((model) => !model.hidden && isChatModel(model))
-			.map((model) => model.id);
-		const { enabled, replacements } = pickLatest(service.enabled, candidates);
-		if (replacements.length === 0) return [];
-		service.enabled = enabled;
+		const service = files.config.services.find((item) => item.name === name);
+		const plan = service ? this.planLatest(service, files.cache[name]) : undefined;
+		if (!service || !plan) return [];
+		service.enabled = plan.enabled;
+		this.commit(files);
 		saveConfig(this.config);
-		this.registerAll();
+		return plan.replacements;
+	}
+
+	/** 换掉模型之后：替换 pi 设置里的旧模型，并在 pi 的界面上提示。settings.json 读写不了时跳过，启用列表已经保存。 */
+	private async afterMigration(name: string, replacements: Replacement[]): Promise<void> {
 		try {
 			await replaceModels(name, new Map(replacements.map(({ from, to }) => [from, to])));
 		} catch {
-			// settings.json 读不了或写不了时只跳过这一步，启用列表已经保存。
+			// 只跳过这一步。
 		}
-		return replacements;
+		const changes = replacements.map(({ from, to }) => `${from} → ${to}`).join("、");
+		try {
+			this.notify?.(`${name}：${changes}。当前会话请用 /model 切换`);
+		} catch {
+			// 提示失败不影响结果。
+		}
 	}
 
 	private isCurrent(service: ServiceConfig): boolean {
@@ -382,14 +431,21 @@ export class Endpoints {
 		this.registerAll();
 	}
 
-	/** 开启或关闭“每系最新”。开启时立即按缓存的目录调整一次，不访问网络。 */
+	/**
+	 * 开启或关闭“每系最新”。开启时按缓存的目录立即执行一次，不刷新目录；需要时先等 models.dev 更新完（最多 60 秒）。
+	 * 开关和换过的启用列表一起保存，只注册一次。
+	 */
 	async setLatestPerFamily(name: string, on: boolean): Promise<void> {
+		this.requireService(name);
+		if (on) await this.fetchModelsDev(false);
 		this.beginChange();
 		const service = this.requireService(name);
 		service.latestPerFamily = on || undefined;
+		const plan = this.planLatest(service, this.cache[name]);
+		if (plan) service.enabled = plan.enabled;
 		saveConfig(this.config);
 		this.registerAll();
-		if (on) await this.applyLatestPerFamily(name);
+		if (plan) await this.afterMigration(name, plan.replacements);
 	}
 
 	setEnabled(name: string, id: string, enabled: boolean): void {
@@ -424,6 +480,17 @@ export class Endpoints {
 		if (!service) throw new Error(`没有名为 ${name} 的服务`);
 		return service;
 	}
+}
+
+interface Files {
+	config: EndpointsConfig;
+	auth: AuthFile;
+	cache: CacheFile;
+}
+
+/** 读配置、密钥和目录缓存三个文件，不改内存状态。配置或密钥文件损坏时抛出错误。 */
+function readFiles(): Files {
+	return { config: loadConfig(), auth: loadAuth(), cache: loadCache() };
 }
 
 const FALLBACK_SOURCES = new Set<Source>(["modelsdev", "default"]);
