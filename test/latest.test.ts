@@ -665,6 +665,67 @@ describe("新版提醒", () => {
 		expect(Object.keys(readState().notifiedUpdates)).toEqual(["cpa", "fresh"]);
 	});
 
+	it("清理过期记录时用读到状态之后的时间：另一个 pi 刚写入的、提示时间晚于本进程先前取到的时间的记录不会被删", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		await refreshModels();
+		let clock = Date.now();
+		let injected = false;
+		vi.spyOn(Date, "now").mockImplementation(() => {
+			// 本进程在提醒流程里第一次取时间时，另一个 pi 恰好写入一条记录，它的提示时间比这次取到的晚。
+			if (!injected && new Error().stack?.includes("noticeUpdates")) {
+				injected = true;
+				const state = readState();
+				state.notifiedUpdates.other = [{ from: "x-1", to: "x-2", at: clock + 1000 }];
+				writeFileSync(stateFile(), JSON.stringify(state));
+				const now = clock;
+				clock += 2000;
+				return now;
+			}
+			return clock;
+		});
+		await refreshModels();
+		expect(injected).toBe(true);
+		expect(readState().notifiedUpdates.other).toEqual([{ from: "x-1", to: "x-2", at: expect.any(Number) }]);
+		expect(readState().notifiedUpdates.cpa).toHaveLength(1);
+	});
+
+	describe("改名和删除的记录以 endpoints.json 保存成功为准", () => {
+		/** 临时文件的位置被目录占住，写入失败；返回解除的函数。 */
+		const block = (file: string) => {
+			const path = join(temp.dir, `${file}.${process.pid}.tmp`);
+			mkdirSync(path);
+			return () => rmSync(path, { recursive: true });
+		};
+		async function notified() {
+			const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+			listen(endpoints);
+			catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+			await refreshModels();
+			expect(readState().notifiedUpdates.cpa).toHaveLength(1);
+			return endpoints;
+		}
+
+		it("改名时配置保存失败，记录留在旧名下", async () => {
+			const endpoints = await notified();
+			const unblock = block("endpoints.json");
+			expect(() => endpoints.saveService({ name: "cpa2", baseUrl: "https://cpa.test" } as never, "cpa")).toThrow();
+			unblock();
+			expect(readState().notifiedUpdates.cpa).toHaveLength(1);
+			expect(readState().notifiedUpdates.cpa2).toBeUndefined();
+		});
+
+		it("删除时配置已保存、之后清密钥失败，记录也已清掉", async () => {
+			const endpoints = await notified();
+			const unblock = block("endpoints-auth.json");
+			expect(() => endpoints.removeService("cpa")).toThrow();
+			unblock();
+			expect(JSON.parse(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).services).toEqual([]);
+			expect(readState()).toEqual({ notifiedUpdates: {} });
+		});
+	});
+
 	it("只换一次、打开开关并换了模型、停用旧版、删除服务时清掉对应的记录，改名时搬到新名下", async () => {
 		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol", "claude-opus-5-5"], ["gpt-6.1-sol", "claude-opus-5-5"]);
 		listen(endpoints);

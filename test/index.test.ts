@@ -165,6 +165,18 @@ describe("插件入口的提示", () => {
 		expect(shown.ui.notify).toHaveBeenCalledTimes(1);
 	});
 
+	it("本实例自己的会话显示了提示时，也清扫失效的上下文", async () => {
+		const stale = [ctxOf({}, false), ctxOf({}, false)];
+		for (const ctx of stale) load().emit("session_start", ctx);
+		const own = load();
+		own.emit("session_start", ctxOf({}, false));
+		for (const ctx of stale) Object.defineProperty(ctx, "hasUI", { get: () => { throw new Error("stale"); } });
+		expect(contextCountForTest()).toBe(3);
+		await own.refresh();
+		expect(records()).toHaveLength(1);
+		expect(contextCountForTest()).toBe(1);
+	});
+
 	it("注册和投递时清扫整组失效的上下文", async () => {
 		const stale = [ctxOf({}, false), ctxOf({}, false)];
 		for (const ctx of stale) load().emit("session_start", ctx);

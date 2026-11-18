@@ -106,10 +106,10 @@ export interface Owner {
  *    实例从没收到 `session_start` 时不知道自己属于哪个会话，不提示。
  */
 export function notifyFor(owner: Owner, message: string, level: "info" | "warning"): boolean {
+	sweep();
 	const own = owner.ctx && live({ ctx: new WeakRef(owner.ctx) });
 	if (own && show(own, message, level)) return true;
 	if (!owner.ctx && !owner.runtime) return false;
-	sweep();
 	const list = contexts();
 	for (let index = list.length - 1; index >= 0; index--) {
 		const item = list[index];

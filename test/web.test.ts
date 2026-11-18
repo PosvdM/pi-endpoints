@@ -227,6 +227,39 @@ describe("管理页的操作", () => {
 		expect(state.services[0].latestPerFamily).toBe(false);
 	});
 
+	it("刷新带 latestPerFamily:false 时只刷新目录、不替换，即使磁盘上开关开着；不传时照旧替换", async () => {
+		let ids = ["gpt-6-sol", "gpt-6.1-sol"];
+		const modelsDev = { moonshotai: { id: "moonshotai", models: { "kimi-k9": { limit: { context: 1000, output: 100 } } } } };
+		vi.stubGlobal("fetch", async (url: string) =>
+			new Response(
+				JSON.stringify(
+					url === MODELS_DEV_URL ? modelsDev : url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) },
+				),
+			),
+		);
+		const enabledIds = (state: { services: { models: { id: string; enabled: boolean }[] }[] }) =>
+			state.services[0].models.filter((model) => model.enabled).map((model) => model.id);
+		await call("/api/saveService", { apiKey: "sk-1", service: { name: "relay", baseUrl: "https://relay.test" } });
+		await call("/api/setEnabled", { name: "relay", id: "gpt-6.1-sol", enabled: true });
+		await call("/api/setLatestPerFamily", { name: "relay", latestPerFamily: true });
+
+		ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		let state = await (await call("/api/refresh", { name: "relay", latestPerFamily: false })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		expect(state.services[0].models.map((model: { id: string }) => model.id)).toContain("gpt-6.2-sol");
+		expect(enabledIds(state)).toEqual(["gpt-6.1-sol"]);
+		expect(JSON.parse(readFileSync(join(temp.dir, "endpoints.json"), "utf8")).services[0].enabled).toEqual(["gpt-6.1-sol"]);
+
+		const bad = await call("/api/refresh", { name: "relay", latestPerFamily: "no" });
+		expect(bad.status).toBe(400);
+
+		state = await (await call("/api/refresh", { name: "relay", latestPerFamily: true })).json();
+		expect(enabledIds(state)).toEqual(["gpt-6.2-sol"]);
+		ids = ["gpt-6.2-sol", "gpt-6.3-sol"];
+		state = await (await call("/api/refresh", { name: "relay" })).json();
+		expect(enabledIds(state)).toEqual(["gpt-6.3-sol"]);
+	});
+
 	it("状态里带待处理的新版，applyLatestOnce 只替换一次、不改开关", async () => {
 		const modelsDev = { moonshotai: { id: "moonshotai", models: { "kimi-k9": { limit: { context: 1000, output: 100 } } } } };
 		const ids = ["gpt-6-sol", "gpt-6.1-sol"];

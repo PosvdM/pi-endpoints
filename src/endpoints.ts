@@ -352,8 +352,10 @@ export class Endpoints {
 	 * 别的服务的配置也可能换了，它们的 `refreshModels` 会按内存里的新配置发布，注册必须跟内存一致。
 	 * 进入注册时认领共享的 models.dev 下载。下载任务有后台调用方时它会先注册一次，这里还会再注册；纯管理页刷新时任务不注册。
 	 * 返回目录刷新失败的原因；models.dev 失败不算刷新失败。
+	 * `migrate` 为假时只刷新目录和全量注册，不执行“每系最新”，即使磁盘上的开关开着：页面发出刷新时显示的开关是关的，
+	 * 不能违背用户看到的开关去换模型。
 	 */
-	async refreshForPage(name: string): Promise<string | undefined> {
+	async refreshForPage(name: string, options: { migrate?: boolean } = {}): Promise<string | undefined> {
 		this.beginChange();
 		let refreshError: string | undefined;
 		let replacements: Replacement[] = [];
@@ -365,7 +367,7 @@ export class Endpoints {
 				refreshError = describeError(error);
 			}
 			claim = await this.waitModelsDev();
-			if (refreshError === undefined) replacements = this.migrateAndCommit(name);
+			if (refreshError === undefined && options.migrate !== false) replacements = this.migrateAndCommit(name);
 		} finally {
 			claim?.();
 			this.registerAll();
@@ -484,11 +486,13 @@ export class Endpoints {
 	 * 记录只在两种情况下去掉：用户处理了旧版（见 `forgetNotified()` 的调用处），或者过了 7 天（这里顺带清理所有服务的）。
 	 * 暂时不在待处理列表里的记录不删：目录某次刷新漏掉了新版，下次又出现时不该再提示。
 	 * 在重新读取的文件快照上计算，不改内存状态、不重新注册，也不等待任何东西。
+	 * 判断过期用的时间在读到状态快照之后再取：先取时间再读，会把别的 pi 在这期间写入的记录（提示时间晚于取到的时间）
+	 * 当成时钟回拨删掉。提示的时间单独记录。
 	 */
 	private noticeUpdates(name: string): void {
-		const now = Date.now();
-		const shown = this.showUpdates(name, now);
+		const shown = this.showUpdates(name);
 		editState((state) => {
+			const now = Date.now();
 			let changed = false;
 			for (const [service, list] of Object.entries(state.notifiedUpdates)) {
 				const kept = list.filter((item) => isRecent(item, now));
@@ -497,10 +501,10 @@ export class Endpoints {
 				if (kept.length) state.notifiedUpdates[service] = kept;
 				else delete state.notifiedUpdates[service];
 			}
-			if (shown.length) {
-				const keys = new Set(shown.map(replacementKey));
+			if (shown) {
+				const keys = new Set(shown.due.map(replacementKey));
 				const others = (state.notifiedUpdates[name] ?? []).filter((item) => !keys.has(replacementKey(item)));
-				state.notifiedUpdates[name] = [...others, ...shown.map(({ from, to }) => ({ from, to, at: now }))];
+				state.notifiedUpdates[name] = [...others, ...shown.due.map(({ from, to }) => ({ from, to, at: shown.at }))];
 				changed = true;
 			}
 			return changed;
@@ -508,28 +512,32 @@ export class Endpoints {
 	}
 
 	/**
-	 * 提示这个服务到期的新版，返回确实显示了的替换。本进程还没有 models.dev 数据时推迟到下次刷新。
+	 * 提示这个服务到期的新版，返回确实显示了的替换和判断用的时间（记作提示时间）；没有显示时返回 undefined。
+	 * 本进程还没有 models.dev 数据时推迟到下次刷新。
 	 * 开关开着的服务由 `migrateOnDisk()` 处理；快照里拿不到密钥（别的 pi 删了密钥）的服务不提醒，用户已经不再用它。
 	 */
-	private showUpdates(name: string, now: number): Replacement[] {
-		if (!hasModelsDevData()) return [];
+	private showUpdates(name: string): { due: Replacement[]; at: number } | undefined {
+		if (!hasModelsDevData()) return undefined;
 		let files: Files;
 		try {
 			files = readFiles();
 		} catch {
-			return [];
+			return undefined;
 		}
 		const service = files.config.services.find((item) => item.name === name);
-		if (!service || service.latestPerFamily || !resolveKey(service, files.auth)) return [];
+		if (!service || service.latestPerFamily || !resolveKey(service, files.auth)) return undefined;
 		const updates = this.pendingUpdates(service, files.cache[name]);
-		const recent = new Set((loadState().notifiedUpdates[name] ?? []).filter((item) => isRecent(item, now)).map(replacementKey));
+		const notified = loadState().notifiedUpdates[name] ?? [];
+		// 读到记录之后再取时间，理由见 noticeUpdates()。
+		const now = Date.now();
+		const recent = new Set(notified.filter((item) => isRecent(item, now)).map(replacementKey));
 		const due = updates.filter((item) => !recent.has(replacementKey(item)));
-		if (!due.length) return [];
+		if (!due.length) return undefined;
 		const shown = this.tryNotify(
 			`${service.displayName || name} 有新版模型：${describeReplacements(due)}。输入 /endpoints，在模型页点“换成新版”只换这一次，或点“开启自动替换”以后自动换。`,
 			"warning",
 		);
-		return shown ? due : [];
+		return shown ? { due, at: now } : undefined;
 	}
 
 	private isCurrent(service: ServiceConfig): boolean {
@@ -583,7 +591,6 @@ export class Endpoints {
 			const error = this.errors.get(previousName);
 			this.errors.delete(previousName);
 			if (error) this.errors.set(service.name, error);
-			renameNotified(previousName, service.name);
 		}
 		if (existing && existing.baseUrl !== service.baseUrl) {
 			// 换了地址，旧目录和旧错误都不再可信。
@@ -592,6 +599,8 @@ export class Endpoints {
 			this.errors.delete(service.name);
 		}
 		saveConfig(this.config);
+		// 提醒记录以配置保存成功为准：保存失败时服务仍是旧名，记录留在旧名下。
+		if (existing && previousName !== undefined && service.name !== previousName) renameNotified(previousName, service.name);
 		this.registerAll();
 		return service;
 	}
@@ -607,6 +616,8 @@ export class Endpoints {
 		this.beginChange();
 		this.config.services = this.config.services.filter((service) => service.name !== name);
 		saveConfig(this.config);
+		// 配置保存成功，服务就已经删了；之后清密钥或缓存失败也不影响清掉提醒记录。
+		forgetNotified(name);
 		if (this.auth[name]) {
 			delete this.auth[name];
 			saveAuth(this.auth);
@@ -616,7 +627,6 @@ export class Endpoints {
 			saveCache(this.cache);
 		}
 		this.errors.delete(name);
-		forgetNotified(name);
 		this.registerAll();
 	}
 
