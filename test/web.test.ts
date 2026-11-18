@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
@@ -72,6 +73,44 @@ describe("管理页的防护", () => {
 	it("Host 不是 127.0.0.1:端口 时拒绝，防止 DNS 重绑定", async () => {
 		expect(await rawGet(`/?token=${token}`, `evil.test:${base.port}`)).toBe(403);
 		expect(await rawGet(`/?token=${token}`, `127.0.0.1:${base.port}`)).toBe(200);
+	});
+
+	it("CSP 只放行本机的脚本和样式，内联脚本只放行 import map", async () => {
+		const page = await realFetch(web.url);
+		const html = await page.text();
+		const importMap = /<script type="importmap">([\s\S]*?)<\/script>/.exec(html)?.[1] ?? "";
+		expect(JSON.parse(importMap).imports).toEqual({ preact: "/vendor/preact.js", "preact/hooks": "/vendor/hooks.js", htm: "/vendor/htm.js" });
+		const policy = page.headers.get("content-security-policy") ?? "";
+		const hash = createHash("sha256").update(importMap).digest("base64");
+		expect(policy).toContain(`script-src 'self' 'sha256-${hash}';`);
+		expect(policy).toContain("style-src 'self';");
+		expect(policy).not.toContain("unsafe-inline");
+	});
+
+	it("页面的脚本、样式和第三方模块不要求 token，但要检查 Host", async () => {
+		for (const path of ["/app/main.js", "/app/style.css", "/vendor/preact.js", "/vendor/hooks.js", "/vendor/htm.js"]) {
+			const response = await realFetch(new URL(path, base.origin));
+			expect(response.status, path).toBe(200);
+			expect(response.headers.get("content-type")).toBe(path.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
+		}
+		// 浏览器按 ES 模块导入，htm 不能是 UMD 文件。
+		const htm = await (await realFetch(new URL("/vendor/htm.js", base.origin))).text();
+		expect(htm).toMatch(/export\s*\{|export default/);
+		expect(await rawGet("/app/main.js", `evil.test:${base.port}`)).toBe(403);
+		for (const path of ["/app/../server.ts", "/app/%2e%2e%2fserver.ts", "/app/web.ts", "/app/x/y.js", "/vendor/vitest.js", "/page.html"]) {
+			expect(await rawGet(path, `127.0.0.1:${base.port}`), path).toBe(404);
+		}
+	});
+
+	it("响应带递增的编号，操作带回的状态在发出前重新生成", async () => {
+		const first = await call("/api/state");
+		const second = await call("/api/saveService", { service: { name: "cpa", baseUrl: "https://cpa.test" } });
+		expect(Number(second.headers.get("x-endpoints-seq"))).toBeGreaterThan(Number(first.headers.get("x-endpoints-seq")));
+		vi.stubGlobal("fetch", async () => new Response('{"error":"Invalid token"}', { status: 401 }));
+		await call("/api/setKey", { name: "cpa", apiKey: "sk-1" });
+		const refreshed = await (await call("/api/refresh", { name: "cpa" })).json();
+		expect(refreshed.refreshError).toContain("Invalid token");
+		expect(refreshed.services[0]).toMatchObject({ name: "cpa", status: { keySource: "file" } });
 	});
 
 	it("修改操作只接受 JSON", async () => {
