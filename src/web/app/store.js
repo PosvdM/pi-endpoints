@@ -51,8 +51,9 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	// 修改操作排队执行，前一个结束后才发下一个，页面上的操作按点击顺序生效。
 	/** @type {Promise<unknown>} */
 	let queue = Promise.resolve();
-	// 排队中和执行中的修改操作涉及的服务，以及是否失败。刷新据此判断排在它前面的修改有没有失败，见 refresh()。
-	/** @type {Set<{ services: string[]; failed: boolean }>} */
+	// 排队中和执行中的修改操作涉及的服务，以及失败时显示的错误（没失败时为 null）。
+	// 刷新据此判断排在它前面的修改有没有失败，见 refresh()。
+	/** @type {Set<{ services: string[]; error: Snapshot["error"] }>} */
 	const writes = new Set();
 	// 指针按下期间为 true，只推迟发布，见 trackPointer()。
 	let holding = false;
@@ -133,7 +134,7 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 		};
 		const entry = {
 			services: [body.name, body.previousName, /** @type {any} */ (body.service)?.name].filter((name) => typeof name === "string"),
-			failed: false,
+			error: /** @type {Snapshot["error"]} */ (null),
 		};
 		writes.add(entry);
 		const run = async () => {
@@ -148,8 +149,9 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 				}));
 				return result;
 			} catch (failure) {
-				entry.failed = true;
-				update((current) => ({ ...clearPending(current), error: errorOf(messageOf(failure)) }));
+				const error = errorOf(messageOf(failure));
+				entry.error = error;
+				update((current) => ({ ...clearPending(current), error }));
 				return undefined;
 			} finally {
 				writes.delete(entry);
@@ -161,9 +163,25 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	}
 
 	/**
+	 * 页面显示的“每系最新”开关值：发布的快照里的待提交值或服务的值。服务还没发布时（按着指针时打开页面）取最新的状态；
+	 * 找不到服务时为 undefined。
+	 * @param {string} name
+	 */
+	function shownLatest(name) {
+		const pending = published.pending.get(pendingKey.latest(name));
+		if (pending) return pending.value;
+		/** @param {Snapshot} snapshot */
+		const find = (snapshot) => snapshot.data.services.find((item) => item.name === name);
+		return (find(published) ?? find(latest))?.latestPerFamily;
+	}
+
+	/**
 	 * 刷新服务目录。刷新会按磁盘上的配置执行“每系最新”，所以先等调用之前已经排队的修改操作都完成，
 	 * 免得越过还没提交的修改（例如刚关掉的开关）。其中涉及这个服务的修改只要有一个失败，磁盘上的配置就不是用户要的，
-	 * 这次刷新取消，不发请求，顶部保留那个修改的错误；其他服务的修改失败不影响。
+	 * 这次刷新取消，不发请求；其他服务的修改失败不影响。取消时顶部显示那个修改的错误（沿用原来的编号）：
+	 * 期间别的修改成功会清掉顶部错误，用户就看不到刷新为什么没发；顶部已经有更新的错误时保留更新的。
+	 * 请求里带上发起刷新时页面显示的“每系最新”开关值（latestPerFamily，含待提交值），为 false 时服务端不替换模型。
+	 * 前端的等待和取消挡不住所有交错（例如按住指针期间修改失败，松开后的点击先于发布），由服务端按这个值兜底。
 	 * 刷新可能要等一分钟，本身不进队列，之后的修改操作不用等它；过期的状态由编号挡住。
 	 * 后台刷新（打开页面和重新启用服务时）的失败原因只记在服务状态里，不弹顶部提示；连不上管理页本身（如 pi 已退出）时也不打扰。
 	 * @param {string} name
@@ -172,6 +190,10 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	async function refresh(name, { background = false } = {}) {
 		if (latest.refreshing.has(name)) return undefined;
 		const ahead = [...writes].filter((entry) => entry.services.includes(name));
+		const shown = shownLatest(name);
+		const body = { name, ...(typeof shown === "boolean" ? { latestPerFamily: shown } : {}) };
+		// 刷新成功只清掉发起刷新时页面上显示的那条顶部错误。之后出现的错误（如排在前面的修改失败）用户可能还没看到，留着。
+		const seenError = published.error;
 		update((current) => ({ refreshing: new Set(current.refreshing).add(name) }));
 		/** @type {Updater} */
 		const done = (current) => {
@@ -180,17 +202,20 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 			return { refreshing };
 		};
 		await queue;
-		if (ahead.some((entry) => entry.failed)) {
-			update(done);
+		/** @type {NonNullable<Snapshot["error"]>[]} */
+		const failures = ahead.flatMap((entry) => (entry.error ? [entry.error] : []));
+		if (failures.length) {
+			const lost = failures.reduce((a, b) => (b.id > a.id ? b : a));
+			update((current) => ({ ...done(current), ...(current.error && current.error.id >= lost.id ? {} : { error: lost }) }));
 			return undefined;
 		}
 		try {
-			const { result, seq } = await request("refresh", { name });
+			const { result, seq } = await request("refresh", body);
 			update((current) => ({
 				...accept(result, seq),
 				...done(current),
 				...(background ? {} : {
-					error: errorOf(result.refreshError ? `刷新失败：${result.refreshError}` : null),
+					error: result.refreshError ? errorOf(`刷新失败：${result.refreshError}`) : current.error === seenError ? null : current.error,
 					...(result.refreshError ? {} : { okMark: ++ids, toast: { text: "目录已刷新", id: ++ids } }),
 				}),
 			}));
@@ -267,7 +292,11 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 				active.add(event.pointerId);
 				if (holding) return;
 				holding = true;
-				limit = setTimeout(release, HOLD_LIMIT);
+				// 超时放行时也清掉这一轮的指针记录：漏掉的松开事件不再出现，留着记录的话下次点击松开时不会放行。
+				limit = setTimeout(() => {
+					active.clear();
+					release();
+				}, HOLD_LIMIT);
 			};
 			/** @param {PointerEvent} event */
 			const up = (event) => {
