@@ -612,7 +612,7 @@ describe("新版提醒", () => {
 		const notes = listen(endpoints);
 		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
 		await refreshModels();
-		expect(notes).toEqual([["cpa：gpt-6.1-sol → gpt-6.2-sol 已写入配置，新会话生效，当前 pi 用 /reload", "info"]]);
+		expect(notes).toEqual([["cpa：gpt-6.1-sol → gpt-6.2-sol 已写入配置，新会话生效，当前 pi 用 /reload", "warning"]]);
 		expect(existsSync(stateFile())).toBe(false);
 	});
 
@@ -755,7 +755,7 @@ describe("新版提醒", () => {
 			expect(endpoints.service("cpa")?.latestPerFamily).toBeUndefined();
 			expect(providers.get("cpa")?.models?.map((model) => model.id)).toEqual(["gpt-6.2-sol", "other"]);
 			expect(JSON.parse(readFileSync(settingsFile(), "utf8"))).toEqual({ defaultProvider: "cpa", defaultModel: "gpt-6.2-sol", enabledModels: ["cpa/gpt-6.2-sol"] });
-			expect(notes).toEqual([["cpa：gpt-6.1-sol → gpt-6.2-sol。当前会话请用 /model 切换", "info"]]);
+			expect(notes).toEqual([["cpa：gpt-6.1-sol → gpt-6.2-sol。当前会话请用 /model 切换", "warning"]]);
 			expect(endpoints.updates("cpa")).toEqual([]);
 		});
 

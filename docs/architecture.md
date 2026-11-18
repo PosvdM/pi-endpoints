@@ -310,7 +310,7 @@ pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功后调用 `mi
 
 新配置在新会话（pi 设置已改）、新子代理、`/reload` 或下次启动时生效；本进程之后任何经过 `beginChange()` 的修改也会读到它。保存失败时放弃，不影响刷新。models.dev 这时通常还在后台更新，本进程没有数据时推迟到下次刷新。
 
-换了模型之后，`afterMigration()` 用 `replaceModels()` 替换 pi 设置里的旧模型，再调用 `Endpoints.notify` 提示。只改磁盘时提示“<服务名>：旧 id → 新 id 已写入配置，新会话生效，当前 pi 用 /reload”；显式入口提示“<服务名>：旧 id → 新 id。当前会话请用 /model 切换”，旧 id 从注册里去掉后，正在用它的会话不会自动切换。这两种提示用 `info` 级别。`notify(message, level)` 由 `src/index.ts` 设置：它在 `session_start` 时记下 `ctx`，`session_shutdown` 时清掉；有界面（`ctx.hasUI`）时调用 `ctx.ui.notify()` 并返回真，否则返回假。子代理和 `-p`、json 模式没有界面，提示会被丢掉，调用方据此判断提示有没有显示。
+换了模型之后，`afterMigration()` 用 `replaceModels()` 替换 pi 设置里的旧模型，再调用 `Endpoints.notify` 提示。只改磁盘时提示“<服务名>：旧 id → 新 id 已写入配置，新会话生效，当前 pi 用 /reload”；显式入口提示“<服务名>：旧 id → 新 id。当前会话请用 /model 切换”，旧 id 从注册里去掉后，正在用它的会话不会自动切换。这两种提示和[新版提醒](#新版提醒)一样用 `warning` 级别：pi 的 `info` 提示会被紧接着的下一条 `info` 覆盖。`notify(message, level)` 由 `src/index.ts` 设置：它在 `session_start` 时记下 `ctx`，`session_shutdown` 时清掉；有界面（`ctx.hasUI`）时调用 `ctx.ui.notify()` 并返回真，否则返回假。子代理和 `-p`、json 模式没有界面，提示会被丢掉，调用方据此判断提示有没有显示。
 
 ### 新版提醒
 
@@ -318,10 +318,10 @@ pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功后调用 `mi
 
 - `updates(name)`：如果现在打开开关会发生的替换，即 `planLatest(service, catalog, true)` 的 `replacements`，用内存里的配置和缓存计算，不修改任何东西。开关开着、服务停用或配置有问题、models.dev 没有数据、目录缓存的来源地址和服务地址不符时为空。管理页状态里每个服务的 `updates` 就是它。
 - `noticeUpdates(name)`：pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功、`migrateOnDisk()` 之后调用。它和 `migrateOnDisk()` 一样遵守上一节的约束：在 `readFiles()` 重新读取的快照上计算，不改内存、不重新注册、不等待任何东西。本进程没有 models.dev 数据时直接返回，推迟到下次联网刷新。开关开着的服务由 `migrateOnDisk()` 处理，这里跳过。
-- 每个“服务 + 旧 id → 新 id”只提示一次，已提示的记在 `endpoints-state.json` 的 `notifiedUpdates` 里。同一服务这次新出现的替换拼成一条提示：“<显示名> 有新版模型：旧 id → 新 id、……。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。”没有显示名时用服务名。用 `warning` 级别：pi 的 `info` 提示会被紧接着的下一条 `info` 覆盖。
+- 每个“服务 + 旧 id → 新 id”只提示一次，已提示的记在 `endpoints-state.json` 的 `notifiedUpdates` 里。同一服务这次新出现的替换拼成一条提示：“<显示名> 有新版模型：旧 id → 新 id、……。输入 /endpoints 可以一键换成新版，或开启“每系最新”自动替换。”没有显示名时用服务名。级别是 `warning`。
 - 只有 `notify` 返回真（提示确实显示了）时才记录；没有界面时不记录，留到下次有界面的联网刷新。写之前重新读状态文件，只改这个服务的记录，同时去掉已经不在待处理列表里的记录（用户换了模型，或出了更新的版本）；记录没有变化时不写文件。写失败时忽略。
 
-`/endpoints` 打开管理页时，`pageUrl()` 找到第一个 `updates` 非空的服务，在网址后加 `&service=<服务名>`，页面据此直接打开这个服务的模型列表。管理页的 `POST /api/applyLatestOnce`（请求体 `{ name }`）调用 `applyLatestOnce()`，返回最新状态和 `replaced`（换掉的模型，没有时为空数组）。
+管理页的状态带上 `updates`，`applyLatestOnce` 接口按同样的规则只换一次；`/endpoints` 的网址带上第一个有新版的服务名，页面直接打开这个服务的“模型”页。接口、网址和界面见[管理页](#管理页)。
 
 ### pi 设置
 
@@ -366,7 +366,7 @@ pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功后调用 `mi
 
 ## 管理页
 
-`startWebUI()` 在 `127.0.0.1` 的随机端口启动 HTTP 服务。`/endpoints` 保存的是启动用的 Promise，连按两次也只启动一个服务器。`session_shutdown`（退出、`/reload`、`/new`、`/resume`、`/fork`）时关闭。防护措施：
+`startWebUI()` 在 `127.0.0.1` 的随机端口启动 HTTP 服务。`/endpoints` 保存的是启动用的 Promise，连按两次也只启动一个服务器。打开的网址是 `http://127.0.0.1:<端口>/?token=<token>`；有服务的 `updates` 不为空时，`pageUrl()` 在后面加上 `&service=<服务名>`，取第一个这样的服务。`session_shutdown`（退出、`/reload`、`/new`、`/resume`、`/fork`）时关闭。防护措施：
 
 - 每次启动生成 24 字节的随机 token。页面地址带 `?token=`，页面把 token 写进 `<meta>`，之后的接口请求放在 `x-endpoints-token` 请求头里。先比较字节长度，再用 `timingSafeEqual` 比较内容。
 - `Host` 请求头必须是 `127.0.0.1:<端口>`，防止 DNS 重绑定。
@@ -377,12 +377,12 @@ pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功后调用 `mi
 
 接口：
 
-- 每个 JSON 响应带 `X-Endpoints-Seq` 响应头，是 `sendJson()` 按发出顺序递增的编号。状态和编号在同一段同步代码里生成：操作自己带回状态时（如刷新、`clearDefaultModel` 的 `defaultChanged`），`handle()` 在发出前重新生成一次状态，保留操作附带的字段，因为从操作生成状态到 `sendJson()` 之间隔着 `await`，别的请求可能已经改了数据。页面只采用编号比已采用的大的状态，错误响应的编号不用来更新状态。
+- 每个 JSON 响应带 `X-Endpoints-Seq` 响应头，是 `sendJson()` 按发出顺序递增的编号。状态和编号在同一段同步代码里生成：操作自己带回状态时（如刷新的 `refreshError`、`clearDefaultModel` 的 `defaultChanged`、`applyLatestOnce` 的 `replaced`），`handle()` 在发出前重新生成一次状态，保留操作附带的字段，因为从操作生成状态到 `sendJson()` 之间隔着 `await`，别的请求可能已经改了数据。页面只采用编号比已采用的大的状态，错误响应的编号不用来更新状态。
 - `GET /api/state` 返回全部状态，包括 `loadError`、插件版本 `version` 和 models.dev 的状态 `modelsDev: { fetchedAt?, checkedAt?, error?, fetching }`（见 `modelsDevStatus()`）。每个模型在 `ResolvedModel` 的字段（含 `compatSources`、`modelsDev`、`modelType`）之外，还有 `enabled`、`levels` 和原样的手动设置 `override`，手动 compat 里值为 `null` 的字段也在其中。
 - `GET /api/update` 在 npm 上有新版本时返回 `{ latestVersion, releaseUrl }`，否则返回 `{}`。
-- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setServiceDisabled`、`setLatestPerFamily`、`setEnabled`、`setOverride`、`setDefaultModel`、`clearDefaultModel`，成功时返回最新状态，失败时返回 400 和 `{ error }`。状态里每个服务带 `latestPerFamily` 布尔值，以及 `updates: Array<{ from, to }>`：开关关着时，现在打开开关会做的替换，只用于提示。
+- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setServiceDisabled`、`setLatestPerFamily`、`applyLatestOnce`、`setEnabled`、`setOverride`、`setDefaultModel`、`clearDefaultModel`，成功时返回最新状态，失败时返回 400 和 `{ error }`。状态里每个服务带 `latestPerFamily` 布尔值，以及 `updates: Array<{ from, to }>`：开关关着时，现在打开开关会做的替换，只用于提示，由 `updates()` 计算，为空的情况见[新版提醒](#新版提醒)。
 - `setLatestPerFamily` 的请求体是 `{ name, latestPerFamily }`。打开时先按缓存的目录执行一次[每系最新](#每系最新)，再返回状态。
-- `applyLatestOnce` 的请求体是 `{ name }`，按“每系最新”的规则把这个服务已启用的旧版换成新版一次，不改开关，返回状态和 `replaced: Array<{ from, to }>`（没有可换的时为空数组）。
+- `applyLatestOnce` 的请求体是 `{ name }`，按“每系最新”的规则把这个服务已启用的旧版换成新版一次，不改开关，和打开开关一样替换 pi 设置并在 pi 里提示（见[执行时机](#执行时机)），返回状态和 `replaced: Array<{ from, to }>`（没有可换的时为空数组）。
 - `clearDefaultModel` 的请求体是 `{ name, id }`，即页面显示的默认模型；和当前的不一致时不清除，返回 200、最新状态和 `defaultChanged: true`。
 - 每个服务的 `status` 里可能有 `syncError`：配置已保存，但向运行中的 pi 注册或注销时出错，页面在服务顶部显示原因并提示 `/reload`。
 - `setEnabled` 启用 models.dev 标为非 `chat` 类型的模型时返回 400，错误信息说明模型类型，如"jev-latest 是分类模型，pi 不能拿它对话"；停用不受限制。`setDefaultModel` 对这类模型同样返回 400。

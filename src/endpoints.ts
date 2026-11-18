@@ -432,7 +432,8 @@ export class Endpoints {
 		}
 		const changes = describeReplacements(replacements);
 		const message = mode === "disk" ? `${name}：${changes} 已写入配置，新会话生效，当前 pi 用 /reload` : `${name}：${changes}。当前会话请用 /model 切换`;
-		this.tryNotify(message, "info");
+		// 用 warning：pi 的 info 提示会被紧接着的下一条 info 覆盖。
+		this.tryNotify(message, "warning");
 	}
 
 	/** 提示失败不影响结果，按没有显示处理。 */
