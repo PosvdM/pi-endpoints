@@ -704,7 +704,7 @@ describe("写操作和刷新的顺序", () => {
 		slowWrite.resolve(server.current);
 		await settle();
 		expect(server.posts().map((call) => call.path)).toEqual(["setServiceDisabled", "setEnabled", "refresh"]);
-		expect(server.posts()[2].body).toEqual({ name: "a" });
+		expect(server.posts()[2].body).toEqual({ name: "a", latestPerFamily: false });
 	});
 
 	it("同一开关连续“开 → 关”，第一个请求先完成时开关仍显示关", async () => {
@@ -929,8 +929,106 @@ describe("刷新前的修改失败", () => {
 		slow.resolve({ status: 500, error: "写入失败" });
 		await settle();
 		expect(server.posts().map((call) => call.path)).toEqual(["setEnabled", "refresh"]);
-		expect(server.posts()[1].body).toEqual({ name: "a" });
+		expect(server.posts()[1].body).toEqual({ name: "a", latestPerFamily: false });
 		expect($(".toast")?.textContent).toBe("目录已刷新");
+	});
+
+	it("所有刷新都带上页面显示的“每系最新”开关值", async () => {
+		const server = fakeServer(state([service("a", [], { latestPerFamily: true }), service("b", [])]));
+		await open(server);
+		// 打开页面时的后台刷新。
+		expect(server.posts().map((call) => call.body)).toEqual([{ name: "a", latestPerFamily: true }, { name: "b", latestPerFamily: false }]);
+		server.calls.length = 0;
+		// 开关正在提交时按待提交的值。
+		const slow = deferred<Json>();
+		server.handlers.setLatestPerFamily = () => slow.promise;
+		toggle($(".latest-toggle input"));
+		await settle();
+		byText(".head .btn", "刷新目录")?.click();
+		slow.resolve(server.current = state([service("a", [], { latestPerFamily: false }), service("b", [])]));
+		await settle();
+		expect(server.posts().at(-1)?.body).toEqual({ name: "a", latestPerFamily: false });
+	});
+
+	it("按下“刷新目录”期间关闭失败，松开后的点击先于重画：刷新按页面显示的“关”发出", async () => {
+		const server = fakeServer(state([service("relay", [model("gpt-6-sol", { enabled: true })], { latestPerFamily: true })]));
+		await open(server);
+		server.calls.length = 0;
+		const slow = deferred<Json>();
+		server.handlers.setLatestPerFamily = () => slow.promise;
+		toggle($(".latest-toggle input"));
+		await settle();
+		expect($(".latest-toggle")?.textContent).toContain("未开启");
+		const button = byText(".head .btn", "刷新目录") as HTMLElement;
+		document.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, bubbles: true }));
+		slow.resolve(Promise.reject(new TypeError("Failed to fetch")) as unknown as Json);
+		await settle();
+		// 松开后、发布之前处理点击。
+		document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true }));
+		button.click();
+		await settle();
+		const refresh = server.posts().find((call) => call.path === "refresh");
+		// 前端已经找不到失败的修改，刷新照样发出，带上 latestPerFamily: false，服务端据此不替换模型。
+		expect(refresh?.body).toEqual({ name: "relay", latestPerFamily: false });
+		expect($(".banner.err")?.textContent).toContain("Failed to fetch");
+	});
+
+	it("刷新取消时恢复被别的修改清掉的原错误，编号不变", async () => {
+		const server = fakeServer(state([service("a", [], { latestPerFamily: true }), service("b", [])]));
+		const store = await open(server);
+		server.calls.length = 0;
+		const slowA = deferred<Json>();
+		const slowB = deferred<Json>();
+		server.handlers.setLatestPerFamily = () => slowA.promise;
+		server.handlers.saveService = () => slowB.promise;
+		toggle($(".latest-toggle input"));
+		await settle();
+		byText(".svc .name", "b")?.click();
+		await settle();
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		byText(".actions .btn", "保存")?.click();
+		await settle();
+		byText(".svc .name", "a")?.click();
+		await settle();
+		byText(".head .btn", "刷新目录")?.click();
+		await settle();
+		slowA.resolve({ status: 500, error: "关闭失败" });
+		await settle();
+		const lost = store.get().error;
+		expect(lost?.text).toBe("关闭失败");
+		// b 保存成功，清掉顶部错误。
+		slowB.resolve(server.current);
+		await settle();
+		expect(server.posts().some((call) => call.path === "refresh" && call.body?.name === "a")).toBe(false);
+		expect(store.get().error).toBe(lost);
+		expect($(".banner.err")?.textContent).toContain("关闭失败");
+	});
+
+	it("刷新取消时顶部已有更新的错误就保留它", async () => {
+		const server = fakeServer(state([service("a", [], { latestPerFamily: true }), service("b", [])]));
+		await open(server);
+		const slowA = deferred<Json>();
+		const slowB = deferred<Json>();
+		server.handlers.setLatestPerFamily = () => slowA.promise;
+		server.handlers.saveService = () => slowB.promise;
+		toggle($(".latest-toggle input"));
+		await settle();
+		byText(".svc .name", "b")?.click();
+		await settle();
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		byText(".actions .btn", "保存")?.click();
+		await settle();
+		byText(".svc .name", "a")?.click();
+		await settle();
+		byText(".head .btn", "刷新目录")?.click();
+		await settle();
+		slowA.resolve({ status: 500, error: "关闭失败" });
+		await settle();
+		slowB.resolve({ status: 400, error: "b 保存失败" });
+		await settle();
+		expect($(".banner.err")?.textContent).toContain("b 保存失败");
 	});
 });
 
@@ -1039,6 +1137,25 @@ describe("按着指针时只推迟重画", () => {
 		await settle();
 		expect(rowIds()).toEqual(["gpt-6-sol"]);
 		release();
+		await settle();
+		updated();
+	});
+
+	it("超时放行后，换一个指针点击时松开即放行", async () => {
+		const server = fakeServer(state([service("relay", [model("gpt-6-sol")])]));
+		await open(server);
+		// 第一个指针的松开事件丢了，等超时放行。
+		pointer("pointerdown", { pointerId: 1 });
+		await new Promise((resolve) => setTimeout(resolve, HOLD_LIMIT + 50));
+		const reply = deferred<Json>();
+		server.handlers.refresh = () => reply.promise;
+		byText(".head .btn", "刷新目录")?.click();
+		await settle();
+		pointer("pointerdown", { pointerId: 2 });
+		reply.resolve(state([service("relay", [model("gpt-6.1-sol"), model("gpt-6-sol")])]));
+		await settle();
+		expect(rowIds()).toEqual(["gpt-6-sol"]);
+		pointer("pointerup", { pointerId: 2 });
 		await settle();
 		updated();
 	});
