@@ -229,8 +229,12 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 		case "setKey":
 			endpoints.setKey(str(body.name, "name"), str(body.apiKey, "apiKey"));
 			return undefined;
-		case "refresh":
-			return refreshService(endpoints, str(body.name, "name"));
+		case "refresh": {
+			// 页面发出刷新时显示的“每系最新”开关（含还没提交的值）。为 false 时这次不替换，即使磁盘上开着；不传时按磁盘上的开关。
+			const latest = body.latestPerFamily;
+			if (latest !== undefined && typeof latest !== "boolean") throw new HttpError(400, "latestPerFamily 必须是布尔值");
+			return refreshService(endpoints, str(body.name, "name"), latest !== false);
+		}
 		case "setServiceDisabled":
 			endpoints.setServiceDisabled(str(body.name, "name"), body.disabled === true);
 			return undefined;
@@ -274,11 +278,11 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 }
 
 /**
- * 刷新服务目录，等 models.dev 更新完（最多 60 秒），目录刷新成功时再按“每系最新”调整启用的模型。
+ * 刷新服务目录，等 models.dev 更新完（最多 60 秒），目录刷新成功、`migrate` 为真时再按“每系最新”调整启用的模型。
  * models.dev 失败不算刷新失败，原因在状态的 `modelsDev.error` 里。
  */
-async function refreshService(endpoints: Endpoints, name: string) {
-	const refreshError = await endpoints.refreshForPage(name);
+async function refreshService(endpoints: Endpoints, name: string, migrate = true) {
+	const refreshError = await endpoints.refreshForPage(name, { migrate });
 	return refreshError === undefined ? undefined : { ...state(endpoints), refreshError };
 }
 
