@@ -163,6 +163,9 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 		case "setServiceDisabled":
 			endpoints.setServiceDisabled(str(body.name, "name"), body.disabled === true);
 			return undefined;
+		case "setLatestPerFamily":
+			await endpoints.setLatestPerFamily(str(body.name, "name"), body.latestPerFamily === true);
+			return undefined;
 		case "setDefaultModel": {
 			const name = str(body.name, "name");
 			const id = str(body.id, "id");
@@ -193,13 +196,13 @@ async function action(endpoints: Endpoints, name: string, body: Record<string, u
 }
 
 /**
- * 刷新服务目录，再在需要时更新 models.dev 并等它完成（最多 60 秒）。
+ * 刷新服务目录，成功时按“每系最新”调整启用的模型，再在需要时更新 models.dev 并等它完成（最多 60 秒）。
  * models.dev 失败不算刷新失败，原因在状态的 `modelsDev.error` 里。
  */
 async function refreshService(endpoints: Endpoints, name: string) {
 	let refreshError: string | undefined;
 	try {
-		await endpoints.refresh(name);
+		await endpoints.refreshAndApply(name);
 		endpoints.register(name);
 	} catch (error) {
 		refreshError = describeError(error);
@@ -275,6 +278,7 @@ function state(endpoints: Endpoints) {
 				defaultApi: service.defaultApi ?? "",
 				apiKeyEnv: service.apiKeyEnv ?? "",
 				headers: service.headers ?? {},
+				latestPerFamily: service.latestPerFamily === true,
 				status: statuses.get(service.name),
 				catalog: catalog ? { fetchedAt: catalog.fetchedAt, codex: catalog.codex, size: catalog.models.length } : undefined,
 				models: endpoints.models(service.name).map((model) => modelView(model, service)),

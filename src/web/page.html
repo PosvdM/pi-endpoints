@@ -178,6 +178,8 @@ tr:hover .star.off, .star.off:focus-visible, .drawer-head .star.off { opacity: 1
 .hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
 .actions { display: flex; gap: 8px; align-items: center; margin-top: 18px; }
 .key-row { display: flex; gap: 8px; }
+.card h3.switch-title { display: flex; gap: 10px; align-items: center; }
+.switch-title label { cursor: pointer; }
 
 /* 详情抽屉 */
 .scrim { position: fixed; inset: 0; background: rgba(10, 12, 16, .28); z-index: 10; }
@@ -998,6 +1000,18 @@ function renderKey(item) {
 	);
 }
 
+// 开关立即生效，不属于服务表单，没有未保存的内容需要在重画时保留。
+function renderLatest(item) {
+	const toggle = h("input", { type: "checkbox", class: "switch", id: "latest-per-family", checked: item.latestPerFamily, onchange: async (event) => {
+		const on = event.target.checked;
+		if (!(await run("setLatestPerFamily", { name: item.name, latestPerFamily: on }, on ? "已开启" : "已关闭"))) event.target.checked = !on;
+	} });
+	return h("div", { class: "card" },
+		h("h3", { class: "switch-title" }, toggle, h("label", { for: "latest-per-family" }, "每个系列只保留最新版")),
+		h("div", { class: "hint", style: "margin:0" }, "开启后，已启用模型所在的每个系列只保留最新版，目录里出了新版本会自动启用、并停用旧版本；手动启用的旧版本也会在下次刷新时被换掉。"),
+	);
+}
+
 function renderDanger(item) {
 	return h("div", { class: "card danger" },
 		h("h3", {}, "删除服务"),
@@ -1043,7 +1057,7 @@ function render() {
 			h("button", { class: `tab${tab === "settings" ? " active" : ""}`, onclick: () => { tab = "settings"; openModel = null; renderDrawer(); render(); } }, "服务设置"),
 		));
 		if (tab === "models") parts.push(renderModels(item));
-		else parts.push(renderKey(item), renderServiceForm(item), renderDanger(item));
+		else parts.push(renderKey(item), renderServiceForm(item), renderLatest(item), renderDanger(item));
 	}
 	content.replaceChildren(...parts);
 }

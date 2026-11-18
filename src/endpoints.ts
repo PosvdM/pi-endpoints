@@ -20,6 +20,8 @@ import {
 	saveConfig,
 	type ServiceConfig,
 } from "./config.ts";
+import { replaceModels } from "./defaults.ts";
+import { pickLatest, type Replacement } from "./family.ts";
 import { loadModelsDev, updateModelsDev } from "./modelsdev.ts";
 import { isChatModel, PI_LEVELS, type ResolvedModel, resolveModel, resolveService, type Source, SUPPORTED_APIS, toProviderModel } from "./resolve.ts";
 
@@ -149,11 +151,11 @@ export class Endpoints {
 				streamSimpleAnthropic(model as Model<"anthropic-messages">, context, withBetas(options, this.betas.get(name)?.get(model.id) ?? [])),
 			models: this.piModels(name, models),
 			// 交互模式和 RPC 模式启动后、打开 /model 时，pi 会调用它刷新目录。
-			// 重新注册时 pi 会以 allowNetwork: false 再调用一次，这时不刷新，也就不会再触发 models.dev 更新。
+			// 重新注册时 pi 会以 allowNetwork: false 再调用一次，这时不刷新，也就不会再触发 models.dev 更新和“每系最新”。
 			refreshModels: async (context) => {
 				if (context.allowNetwork) {
 					try {
-						await this.refresh(name, context.signal);
+						await this.refreshAndApply(name, context.signal);
 					} finally {
 						// 在后台更新 models.dev，不拖慢启动。拿到新数据后会重新注册所有服务。
 						void this.updateModelsDev();
@@ -232,6 +234,50 @@ export class Endpoints {
 		return catalog;
 	}
 
+	/**
+	 * 刷新目录；成功并写入缓存后，按“每系最新”调整启用的模型。刷新失败时抛出错误，不调整。
+	 * 调整了模型时会重新注册所有服务，否则不负责重新注册。
+	 */
+	async refreshAndApply(name: string, signal?: AbortSignal): Promise<Catalog> {
+		const service = this.service(name);
+		const catalog = await this.refresh(name, signal);
+		// 请求期间服务被删除、改名或换了地址时，refresh() 没有写缓存，这里也不调整。
+		if (service && this.isCurrent(service)) await this.applyLatestPerFamily(name, service.baseUrl);
+		return catalog;
+	}
+
+	/**
+	 * 服务开启了 `latestPerFamily` 时，按缓存的目录在每个已启用的系列里只保留最新版（规则见 `pickLatest()`）。
+	 * 候选只取目录里没有隐藏的对话模型。有变化时保存配置、重新注册，再把 pi 设置里的旧模型换成新版；
+	 * 没有变化时不写文件。不会失败：配置文件损坏时不调整，pi 设置读写不了时跳过那一步。
+	 * 带 `baseUrl` 时，重新读到的服务地址和它不同就不调整，缓存里的目录未必属于新地址。
+	 */
+	async applyLatestPerFamily(name: string, baseUrl?: string): Promise<Replacement[]> {
+		try {
+			this.beginChange();
+		} catch {
+			return [];
+		}
+		const service = this.service(name);
+		const catalog = this.cache[name];
+		if (!service?.latestPerFamily || !catalog || (baseUrl !== undefined && service.baseUrl !== baseUrl)) return [];
+		const candidates = catalog.models
+			.map((model) => resolveModel(service, model, catalog))
+			.filter((model) => !model.hidden && isChatModel(model))
+			.map((model) => model.id);
+		const { enabled, replacements } = pickLatest(service.enabled, candidates);
+		if (replacements.length === 0) return [];
+		service.enabled = enabled;
+		saveConfig(this.config);
+		this.registerAll();
+		try {
+			await replaceModels(name, new Map(replacements.map(({ from, to }) => [from, to])));
+		} catch {
+			// settings.json 读不了或写不了时只跳过这一步，启用列表已经保存。
+		}
+		return replacements;
+	}
+
 	private isCurrent(service: ServiceConfig): boolean {
 		return this.service(service.name)?.baseUrl === service.baseUrl;
 	}
@@ -268,6 +314,7 @@ export class Endpoints {
 		if (existing) {
 			// 编辑表单不带模型选择和服务开关，保留原来的。
 			service.disabled = existing.disabled;
+			service.latestPerFamily = existing.latestPerFamily;
 			service.enabled = input.enabled ?? existing.enabled;
 			service.overrides = input.overrides ?? existing.overrides;
 			this.config.services[this.config.services.indexOf(existing)] = service;
@@ -333,6 +380,16 @@ export class Endpoints {
 		service.disabled = disabled || undefined;
 		saveConfig(this.config);
 		this.registerAll();
+	}
+
+	/** 开启或关闭“每系最新”。开启时立即按缓存的目录调整一次，不访问网络。 */
+	async setLatestPerFamily(name: string, on: boolean): Promise<void> {
+		this.beginChange();
+		const service = this.requireService(name);
+		service.latestPerFamily = on || undefined;
+		saveConfig(this.config);
+		this.registerAll();
+		if (on) await this.applyLatestPerFamily(name);
 	}
 
 	setEnabled(name: string, id: string, enabled: boolean): void {

@@ -54,6 +54,43 @@ export async function clearDefaultModel(): Promise<void> {
 	await save(settings);
 }
 
+/**
+ * 把 pi 设置里同一服务商的旧模型换成新模型，`replacements` 是旧 id 到新 id 的对应。
+ * 默认模型是旧模型时改成新模型；Ctrl+P 轮换列表里精确等于 `<服务商>/<旧 id>` 的项换成新模型，
+ * 新模型已经在列表里时只删掉旧的。列表不是数组时不动它。没有变化时不写文件。
+ */
+export async function replaceModels(provider: string, replacements: ReadonlyMap<string, string>): Promise<void> {
+	if (replacements.size === 0) return;
+	const settings = open();
+	let changed = false;
+	const defaultId = settings.getDefaultModel();
+	const newDefault = settings.getDefaultProvider() === provider && defaultId !== undefined ? replacements.get(defaultId) : undefined;
+	if (newDefault !== undefined) {
+		settings.setDefaultModelAndProvider(provider, newDefault);
+		changed = true;
+	}
+	const enabledModels = settings.getEnabledModels();
+	if (Array.isArray(enabledModels)) {
+		const references = new Map([...replacements].map(([from, to]) => [`${provider}/${from}`, `${provider}/${to}`]));
+		const next: string[] = [];
+		let replaced = false;
+		for (const pattern of enabledModels) {
+			const to = typeof pattern === "string" ? references.get(pattern) : undefined;
+			if (to === undefined) {
+				next.push(pattern);
+				continue;
+			}
+			replaced = true;
+			if (!next.includes(to) && !enabledModels.includes(to)) next.push(to);
+		}
+		if (replaced) {
+			settings.setEnabledModels(next);
+			changed = true;
+		}
+	}
+	if (changed) await save(settings);
+}
+
 async function save(settings: SettingsManager): Promise<void> {
 	await settings.flush();
 	const errors = settings.drainErrors();

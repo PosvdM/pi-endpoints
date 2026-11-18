@@ -160,6 +160,28 @@ describe("管理页的操作", () => {
 		expect(state.services[0].models[0].compat).toEqual({ value: { sendSessionAffinityHeaders: false }, source: "manual" });
 	});
 
+	it("打开“每系最新”后立刻调整并返回状态，之后刷新目录时自动换成新版", async () => {
+		let ids = ["gpt-6-sol", "gpt-6.1-sol"];
+		vi.stubGlobal("fetch", async (url: string) =>
+			new Response(JSON.stringify(url.includes("client_version") ? { data: [] } : { data: ids.map((id) => ({ id, owned_by: "openai" })) })),
+		);
+		await call("/api/saveService", { service: { name: "relay", baseUrl: "https://relay.test" } });
+		await call("/api/setKey", { name: "relay", apiKey: "sk-1" });
+		await call("/api/refresh", { name: "relay" });
+		await call("/api/setEnabled", { name: "relay", id: "gpt-6-sol", enabled: true });
+
+		let state = await (await call("/api/setLatestPerFamily", { name: "relay", latestPerFamily: true })).json();
+		expect(state.services[0].latestPerFamily).toBe(true);
+		expect(state.services[0].models.filter((model: { enabled: boolean }) => model.enabled).map((model: { id: string }) => model.id)).toEqual(["gpt-6.1-sol"]);
+
+		ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		state = await (await call("/api/refresh", { name: "relay" })).json();
+		expect(state.services[0].models.filter((model: { enabled: boolean }) => model.enabled).map((model: { id: string }) => model.id)).toEqual(["gpt-6.2-sol"]);
+
+		state = await (await call("/api/setLatestPerFamily", { name: "relay", latestPerFamily: false })).json();
+		expect(state.services[0].latestPerFamily).toBe(false);
+	});
+
 	it("刷新失败时返回服务端原文", async () => {
 		vi.stubGlobal("fetch", async () => new Response('{"error":"Invalid token"}', { status: 401 }));
 		await call("/api/saveService", { service: { name: "relay", baseUrl: "https://relay.test" } });

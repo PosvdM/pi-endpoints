@@ -36,6 +36,8 @@ export interface ServiceConfig {
 	headers?: Record<string, string>;
 	/** 停用整个服务：不注册到 pi，其余设置保留。 */
 	disabled?: boolean;
+	/** 每系最新：目录刷新后，已启用模型所在的每个系列只保留最新版。见 `src/family.ts`。 */
+	latestPerFamily?: boolean;
 	/** 启用的模型 id。 */
 	enabled: string[];
 	overrides: Record<string, ModelOverride>;
@@ -93,6 +95,7 @@ export function normalizeService(service: Partial<ServiceConfig>): ServiceConfig
 		baseUrl: normalizeRoot(service.baseUrl),
 		// 启用时不写这个字段，免得改动现有配置。
 		disabled: service.disabled === true ? true : undefined,
+		latestPerFamily: service.latestPerFamily === true ? true : undefined,
 		enabled: Array.isArray(service.enabled) ? service.enabled.filter((id) => typeof id === "string") : [],
 		overrides: service.overrides && typeof service.overrides === "object" ? service.overrides : {},
 	};
