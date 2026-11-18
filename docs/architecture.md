@@ -18,8 +18,9 @@
 | `src/endpoints.ts` | `Endpoints` 类，持有全部状态，负责注册和注销服务商、刷新目录、执行“每系最新”、判断是否需要 models.dev、修改配置。 |
 | `src/commands.ts` | `/endpoints` 命令：启动管理页并打开浏览器。插件只有这一个命令，所有操作都在管理页里完成。 |
 | `src/version.ts` | 插件版本号，以及到 npm 检查有没有新版本。 |
-| `src/web/server.ts` | 管理页的 HTTP 服务和接口。 |
-| `src/web/page.html` | 管理页前端，单个 HTML 文件，原生 JS，没有构建步骤。 |
+| `src/web/server.ts` | 管理页的 HTTP 服务和接口，提供页面、页面脚本和第三方模块。 |
+| `src/web/page.html` | 管理页的 HTML 外壳：token、样式表、import map 和入口脚本。 |
+| `src/web/app/` | 管理页前端，Preact + htm 写的 ES 模块，没有构建步骤。各文件的分工见[前端结构](#前端结构)。 |
 
 ## 数据流
 
@@ -356,46 +357,97 @@ pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功后调用 `mi
 - 每次启动生成 24 字节的随机 token。页面地址带 `?token=`，页面把 token 写进 `<meta>`，之后的接口请求放在 `x-endpoints-token` 请求头里。先比较字节长度，再用 `timingSafeEqual` 比较内容。
 - `Host` 请求头必须是 `127.0.0.1:<端口>`，防止 DNS 重绑定。
 - 修改操作只接受 `POST` 和 `application/json`。跨站页面发这种请求必须先通过 CORS 预检，而服务不响应预检。
-- 页面带 `Content-Security-Policy`，只允许内联脚本和样式，以及对本机接口的请求。
+- 页面带 `Content-Security-Policy`（`pagePolicy()`）：脚本和样式只能来自本机服务（`'self'`），内联脚本只放行 import map，按它内容的 SHA-256 放行，哈希在每次请求时按 `page.html` 计算；不允许 `'unsafe-inline'`。页面因此不能写内联的 `<style>` 和 `style` 属性，样式都写在 `style.css` 的类里。
+- `/app/<文件名>`（`src/web/app/` 这一层里文件名符合 `APP_FILE` 的 `.js`、`.css`）和 `/vendor/<文件名>`（`VENDOR` 里列出的第三方模块）不含密钥，不要求 token，但同样检查 `Host`。其他路径一律返回 404。
 - 接口不返回密钥，只返回密钥来源（`file` 或 `env`）。
 
 接口：
 
+- 每个 JSON 响应带 `X-Endpoints-Seq` 响应头，是 `sendJson()` 按发出顺序递增的编号。状态和编号在同一段同步代码里生成：操作自己带回状态时（如刷新、`clearDefaultModel` 的 `defaultChanged`），`handle()` 在发出前重新生成一次状态，保留操作附带的字段，因为从操作生成状态到 `sendJson()` 之间隔着 `await`，别的请求可能已经改了数据。页面只采用编号比已采用的大的状态，错误响应的编号不用来更新状态。
 - `GET /api/state` 返回全部状态，包括 `loadError`、插件版本 `version` 和 models.dev 的状态 `modelsDev: { fetchedAt?, checkedAt?, error?, fetching }`（见 `modelsDevStatus()`）。每个模型在 `ResolvedModel` 的字段（含 `compatSources`、`modelsDev`、`modelType`）之外，还有 `enabled`、`levels` 和原样的手动设置 `override`，手动 compat 里值为 `null` 的字段也在其中。
 - `GET /api/update` 在 npm 上有新版本时返回 `{ latestVersion, releaseUrl }`，否则返回 `{}`。
-- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setServiceDisabled`、`setLatestPerFamily`、`setEnabled`、`setOverride`、`setDefaultModel`、`clearDefaultModel`，成功时返回最新状态，失败时返回 400 和 `{ error }`。状态里每个服务带 `latestPerFamily` 布尔值。
+- `POST /api/<操作>` 执行 `saveService`、`removeService`、`setKey`、`setServiceDisabled`、`setLatestPerFamily`、`setEnabled`、`setOverride`、`setDefaultModel`、`clearDefaultModel`，成功时返回最新状态，失败时返回 400 和 `{ error }`。状态里每个服务带 `latestPerFamily` 布尔值，以及 `updates: Array<{ from, to }>`：开关关着时，现在打开开关会做的替换，只用于提示。
 - `setLatestPerFamily` 的请求体是 `{ name, latestPerFamily }`。打开时先按缓存的目录执行一次[每系最新](#每系最新)，再返回状态。
+- `applyLatestOnce` 的请求体是 `{ name }`，按“每系最新”的规则把这个服务已启用的旧版换成新版一次，不改开关，返回状态和 `replaced: Array<{ from, to }>`（没有可换的时为空数组）。
 - `clearDefaultModel` 的请求体是 `{ name, id }`，即页面显示的默认模型；和当前的不一致时不清除，返回 200、最新状态和 `defaultChanged: true`。
 - 每个服务的 `status` 里可能有 `syncError`：配置已保存，但向运行中的 pi 注册或注销时出错，页面在服务顶部显示原因并提示 `/reload`。
 - `setEnabled` 启用 models.dev 标为非 `chat` 类型的模型时返回 400，错误信息说明模型类型，如"jev-latest 是分类模型，pi 不能拿它对话"；停用不受限制。`setDefaultModel` 对这类模型同样返回 400。
 - `refresh` 先重新读取配置、密钥和缓存（配置或密钥文件读不了时返回 400；缓存读取或解析失败时按没有缓存处理），再刷新服务目录，需要时再更新 models.dev，等它完成（最多 60 秒）后返回 200 和最新状态。目录刷新失败时状态里多一个 `refreshError`；models.dev 失败不算刷新失败，原因只在 `modelsDev.error` 里。
 - `testModel` 的请求体可以带 `thinkingLevel`：pi 的档位名，必须是这个模型 `levels` 里 `off` 以外的一项，否则返回 400。返回 `{ test: { ok, stopReason, text, error, durationMs, request } }`，`request` 含 `api`、`baseUrl`、`id`，带了档位时还有 `thinkingLevel`。
-- `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。可以带 `apiKey`，和服务一起保存。新建服务时只要拿得到密钥（`apiKey` 或密钥环境变量），就接着按 `refresh` 的方式刷新目录和 models.dev；刷新失败时服务已经保存，和 `refresh` 一样返回 200 和带 `refreshError` 的状态。
-
-页面的状态变化后，`render()` 重建整个内容区，包括操作失败时显示错误。服务表单因此把还没保存的内容记在 `serviceDraft` 里，按服务名区分，重建时优先用它；保存成功、切换服务或点"添加服务"时清掉。密钥卡片的输入框同样把没保存的密钥记在 `keyDraft` 里，清掉的时机相同。新增其他会被 `render()` 重建的表单时，也要这样保存输入。打开页面后，以及在左栏重新启用服务后，`refreshInBackground()` 在后台调用 `refresh`，失败原因只显示在服务状态里，不弹顶部提示。这是唯一不由用户操作触发的重画，所以由 `flush()` 把它推迟到没有文字输入框获得焦点（`typing()` 为假）、也没有按着鼠标的时候，免得输入框失去焦点，或者点击落在被替换掉的元素上。`refreshing` 记下正在刷新的服务，这些服务的"刷新目录"按钮显示"刷新中…"并且不能点，手动刷新也用它。密钥框只出现在添加服务的表单里，已有服务的密钥在单独的密钥卡片里修改。"每个系列只保留最新版"的开关在 `renderLatest()` 生成的单独卡片里，点了立即调用 `setLatestPerFamily`，不属于服务表单，没有需要在重建时保留的输入；请求失败时把开关恢复原状。密钥框用 `type="password"` 加 `autocomplete="one-time-code"`，免得 Chrome 把网站的已存密码填进来：密码框会忽略 `off`，`new-password` 会弹出生成密码。添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随。
-
-模型列表的分组和排序只在前端做，规则在 `page.html` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写），分组和前缀按钮按 `byPrefix()` 排序：`PREFIX_ORDER` 里的前缀按列表顺序排在前面，其余按字母序；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。"已启用"页列的是点按钮时已启用的模型（`pinned`），停用的模型留到下次点按钮或刷新页面，免得开关一点模型就从眼前消失。页面拿到新状态时一律经过 `setState()`，它把新状态里新启用的模型补进 `pinned`，所以“每系最新”自动启用的新版本也会出现在"已启用"页，被换掉的旧版本照常留着。左栏的服务也这样处理：`parked` 记下页面打开时每个服务是否停用，`serviceGroups()` 按这份记录把服务分成启用和停用两组，组内保持配置文件里的顺序；打开页面后新加的服务按加入时的状态归组。
-
-列表的 `kept` 出于同样的原因，记下当前服务里刚用开关启用或停用、或在详情里保存或清除了手动设置的模型，`matches()` 不按"显示隐藏模型"和协议筛选排除这些模型；改了筛选条件（搜索、协议、`owned_by`、"显示隐藏模型"和前缀按钮）、切换服务或刷新页面时清空。`renderChips()` 在当前选中的前缀数量为 0 时补上这个按钮，筛选条件始终看得到。
-
-详情面板不随 `render()` 重建，免得冲掉没保存的输入；`renderDrawer()` 只在打开面板、保存或清除手动设置后重建。每次拿到新状态后，`refreshDrawerHead()` 按最新状态更新面板里的星标和启用开关（`#drawer-toggle`），后台刷新或“每系最新”换掉模型时开关也会跟着变；面板里的模型被停用、又已经不在目录里时，它不再出现在状态里，开关按未启用显示，星标清空：旧的星标可能还显示着被换掉的默认模型，点了会清掉刚换上的新默认模型。面板的其余内容不重建，未保存的输入保留。
-
-- 关闭前的确认：`overrideForm()` 建好表单后记下各输入框的值，`drawerDirty()` 和当前的值比较，测试消息的档位不算在内。Esc、遮罩和 × 都调用 `closeDrawer()`，有修改时先用 `confirm()` 确认。`typing()` 为真，或者 `event.isComposing` 为真、`keyCode` 为 229（输入法正在选字）时，Esc 不处理。
-- 错误的位置：面板分为可滚动的 `.drawer-body`、提示区 `#drawer-msg` 和底部按钮。表单的校验错误、`run()` 失败的原因和测试结果都由 `drawerMessage()` 放进提示区，它在底部按钮上方，不随面板内容滚动。`run()` 成功时只清掉提示区里的错误，测试结果保留。
-- 数字解析：上下文和最大输出用 `type="text"`，由 `parseCount()` 解析。Safari 和 Firefox 的 number 输入框遇到 `1,000,000`、`1M` 时 `value` 为空字符串，会被当成没填。`parseCount()` 接受纯数字、每三位用逗号或空格分组的数字，以及带 K（1000）或 M（1000000）后缀、不超过对应位数的小数；按字符串移动小数点，避免 `1.1 * 1e6` 这类浮点误差。结果不是正的安全整数时报错，不保存。K 和 M 的含义和 `short()` 显示的单位一致。
-- 对话以外的模型：`nonChat()` 按 `modelType` 判断，没有这个字段时按对话模型处理。这类模型没启用时，`enableSwitch()` 生成的开关带 `aria-disabled`，在 `click` 里 `preventDefault()` 阻止勾选；星标也按不能用处理。点不了的开关和星标都不用 `disabled`：禁用的控件会吞掉点击，列表行就打不开详情了，列表行的点击处理只跳过没有 `aria-disabled` 的控件。
-- compat 标签的来源取自 `compatSources`；没有这个字段时按整体来源推算，Anthropic 协议的会话亲和字段没有手动设置时算作默认值。`override.compat` 里值为 `null` 的字段显示为带删除线的标签。
-- 测试消息的档位下拉框列出 `levels` 里除 `off` 以外的档位，选了档位时请求体带 `thinkingLevel`，结果按 `test.request.thinkingLevel` 显示实际发出的档位。
+- `saveService` 带 `previousName` 表示修改已有服务（可以改名），不带表示新建，新建时重名会报错。可以带 `apiKey`，和服务一起保存。`service.latestPerFamily` 只在新建时写进配置，修改已有服务时忽略，开关用 `setLatestPerFamily` 修改。新建服务时只要拿得到密钥（`apiKey` 或密钥环境变量），就接着按 `refresh` 的方式刷新目录和 models.dev；刷新失败时服务已经保存，和 `refresh` 一样返回 200 和带 `refreshError` 的状态。
 
 图例旁的 models.dev 状态由 `modelsDevStatus()` 按 `state.modelsDev` 生成：`fetching` 为真时显示正在拉取，有 `error` 时用警告颜色显示原因，否则显示 `fetchedAt`；都没有时不显示。页面只在拿到新状态时重画，而 `refresh` 等 models.dev 拉取完成才返回，所以刷新目录时一般看不到“正在拉取”；只有页面拿到的状态正处于拉取中时才显示，例如打开页面时 pi 正在后台拉取。
 
-`src/version.ts` 从包内的 `package.json` 读出 `VERSION`。`checkUpdate()` 读取 `https://registry.npmjs.org/pi-endpoints/latest`，用 `isNewer()` 按数字逐段比较 `x.y.z`，带预发布后缀的版本不比较。成功的结果在进程内缓存 6 小时；失败（超时 10 秒）时沿用上次的结果，30 分钟后再试。查询可能要等几秒，所以页面先用 `/api/state` 渲染，再由 `showVersion()` 单独请求 `/api/update`，有新版时在版本号右边加上指向 GitHub Release 的绿色箭头。
+`src/version.ts` 从包内的 `package.json` 读出 `VERSION`。`checkUpdate()` 读取 `https://registry.npmjs.org/pi-endpoints/latest`，用 `isNewer()` 按数字逐段比较 `x.y.z`，带预发布后缀的版本不比较。成功的结果在进程内缓存 6 小时；失败（超时 10 秒）时沿用上次的结果，30 分钟后再试。查询可能要等几秒，所以页面先用 `/api/state` 渲染，再由 `store.checkUpdate()` 单独请求 `/api/update`，有新版时在版本号右边加上指向 GitHub Release 的绿色箭头。
 
 `testModel` 用 `@earendil-works/pi-ai/compat` 的 `completeSimple()` 按当前解析出的参数发一条消息，Anthropic 协议的模型同样经过 `withBetas()`，超时 60 秒。请求带 `thinkingLevel` 时，把它作为 `completeSimple()` 选项里的 `reasoning` 发送，由 pi 按模型的 `thinkingLevelMap` 转换；不带时不设置思考档位。失败时返回 pi 给出的 `errorMessage`，其中包含服务端的原始错误。
+
+### 前端结构
+
+页面没有构建步骤。`page.html` 只有外壳：服务端把 token 写进 `<meta name="endpoints-token">`，import map 把 `preact`、`preact/hooks`、`htm` 指向 `/vendor/` 下的文件，入口是 `/app/main.js`。`src/web/app/` 下的文件都是 ES 模块，带 `// @ts-check`，类型写在 JSDoc 里，`npm run check` 一起检查（`tsconfig.json` 开启了 `allowJs` 和 `checkJs`）：
+
+| 文件 | 内容 |
+|---|---|
+| `main.js` | 入口，读出 token，调用 `startApp()`。 |
+| `app.js` | 根组件 `App`：当前服务、标签页、打开的模型、筛选条件、折叠的分组和冻结的显示；服务页头、提示条和标签页。`startApp(root, { token, search, fetch })` 创建 store 并渲染，测试也从这里启动。 |
+| `store.js` | `createStore()`：服务端状态、顶部错误、正在刷新的服务、提交中的开关和提示条，以及所有接口请求。 |
+| `nav.js` | 左栏：服务列表、“有新版”角标、“添加服务”按钮和版本号。 |
+| `models.js` | “模型”页：新版横幅、工具栏、前缀按钮、“每个系列只保留最新版”开关、模型表和图例。 |
+| `drawer.js` | 模型详情面板。 |
+| `settings.js` | 密钥卡片、服务表单（添加和修改共用）和删除服务。 |
+| `ui.js` | 共用的小组件：来源圆点、星标、启用开关、图标，以及绑定到 Preact 的 `html` 模板函数。 |
+| `util.js` | 不碰 DOM 的纯函数和常量：版本号、前缀、数字解析、手动设置表单和 override 的互转等。 |
+| `style.css` | 全部样式，深色和浅色主题跟随系统。 |
+
+组件只读 store 的快照（`store.get()`），修改都经过 store 的方法；store 每次变化后通知 `App` 重画。Preact 按虚拟 DOM 对比更新，输入框、焦点和滚动位置在重画后保留。表单里没保存的内容放在各自组件的状态里，后台刷新带来的新状态不会冲掉它们。服务表单和密钥卡片以服务名加 `formEpoch` 为 key，切换服务或点“添加服务”时 `formEpoch` 加一，表单重新开始。
+
+### 请求和状态
+
+- `store.act()` 执行修改操作。操作排成一个队列，前一个结束后才发下一个，页面上的操作按点击顺序生效。成功时采用返回的状态、清掉顶部错误、按需显示提示条；返回 `refreshError` 时把原因显示在顶部；失败时把原因显示在顶部，返回 `undefined`。
+- 开关（模型启用、服务停用、“每个系列只保留最新版”）调用 `act()` 时带上 `pending`：请求期间开关按要切换到的值显示，结束后按服务端状态显示，失败时也就拨回原样。
+- `store.refresh()` 刷新目录。刷新最长要等一分钟（等 models.dev），不进队列。`refreshing` 记下正在刷新的服务，这些服务的“刷新目录”按钮显示“刷新中…”且不能点。打开页面后，以及在左栏重新启用服务后，在后台刷新（`background`），失败原因只显示在服务状态里，不弹顶部提示。
+- 后台刷新和修改操作并发时，响应可能先发后到。`accept()` 按 `X-Endpoints-Seq` 丢掉编号不大于已采用编号的状态，所以刷新期间完成的修改不会被刷新带回的旧状态覆盖，而刷新最后生成的状态照常采用。按请求的发送顺序编号做不到这一点：刷新先发，但它的状态最后生成。
+- 测试消息（`store.test()`）不改状态，也不进队列。
+
+### 冻结的显示
+
+停用或修改模型、停用服务之后，行先留在原处，方便改回来。页面对模型表和左栏用同一条规则：本次打开期间冻结。
+
+- 模型表：`visibleModels()` 以“服务 + 筛选条件 + 点前缀按钮的次数”为范围，范围不变时，显示过的模型一直留着，新符合条件的模型照常加进来。所以“已启用”页里停用的模型、没勾“显示隐藏模型”时停用的隐藏模型、按协议筛选时改了协议的模型都留在原处，“每系最新”自动启用的新版会补进“已启用”页。换服务、改搜索或筛选条件、点任意前缀按钮（包括再点一次当前的）或刷新页面后，按条件重新选。冻结的记录 `frozen` 放在 `App` 里，切到“服务设置”再回来时保留。
+- 左栏：`serviceGroups()` 按 `parked` 把服务分成启用和停用两组，组内保持配置文件里的顺序。`parked` 记下服务第一次出现时是否停用，只在刷新页面时重来；删除服务时删掉它的记录。打开页面时默认选中两组合起来的第一个服务。
+
+模型分组和排序的规则在 `util.js` 里：`prefixOf()` 取模型 id 的前缀（去掉 `/` 之前的部分，取第一段，去掉末尾的数字，转小写），分组和前缀按钮按 `byPrefix()` 排序：`PREFIX_ORDER` 里的前缀按列表顺序排在前面，其余按字母序；`newestFirst()` 按 `versionOf()` 从模型名里取出的版本号从大到小排。版本号最多三位数字，可以带一个字母后缀（`4o`）；参数规模（`120b`）和日期（`2024-08-06`、`20250929`）不算版本号。分组的折叠状态按“服务名/前缀”记录。前缀按钮上的数量按前缀以外的筛选条件计算（含冻结的模型）；当前选中的前缀数量为 0 时仍然显示这个按钮，筛选条件始终看得到。
+
+### 详情面板
+
+`App` 以“服务名/模型 id”为 key 渲染 `Drawer`，换模型时整个面板重建：表单、错误和测试结果都只属于这一个模型。测试消息返回时面板已经关了或换了模型，结果就丢掉。
+
+- 生效的参数、启用开关和星标每次重画都按最新状态显示，后台刷新或“每系最新”换掉模型时会跟着变。面板里的模型被停用、又已经不在目录里时，它不再出现在状态里：`App` 传入最后一次看到的模型（`fallback`），开关按未启用显示，星标清空，因为旧的星标可能还显示着被换掉的默认模型，点了会清掉刚换上的新默认模型。
+- 手动设置表单打开时由 `overrideToForm()` 填好，保存或清除成功后按服务端保存的值重填。`dirty` 比较表单当前的值和打开（或上次保存）时的值，测试消息的档位不算在内。Esc、遮罩和 × 都经过 `requestClose()`，有修改时先用 `confirm()` 确认。焦点在文字输入框或下拉框里，或者 `event.isComposing` 为真、`keyCode` 为 229（输入法正在选字）时，Esc 不处理。
+- 错误的位置：面板分为可滚动的 `.drawer-body`、提示区 `.drawer-msg` 和底部按钮。提示区在底部按钮上方，不随面板内容滚动，显示表单的校验错误和打开面板之后出现的顶部错误（面板盖住了页面顶部；先后用 `store.errorMark()` 判断），没有错误时显示测试结果。操作成功清掉顶部错误后，测试结果重新显示。
+- 数字解析：上下文和最大输出用 `type="text"`，由 `parseCount()` 解析。Safari 和 Firefox 的 number 输入框遇到 `1,000,000`、`1M` 时 `value` 为空字符串，会被当成没填。`parseCount()` 接受纯数字、每三位用逗号或空格分组的数字，以及带 K（1000）或 M（1000000）后缀、不超过对应位数的小数；按字符串移动小数点，避免 `1.1 * 1e6` 这类浮点误差。结果不是正的安全整数时报错，不保存。K 和 M 的含义和 `short()` 显示的单位一致。
+- 思考档位：空数组回显为 `none`，再次保存时不会丢失；只填 `none` 时保存为空数组。价格只填部分字段时，其余字段补 0。
+- 对话以外的模型：`nonChat()` 按 `modelType` 判断，没有这个字段时按对话模型处理。这类模型没启用时，`EnableSwitch` 生成的开关带 `aria-disabled`，在 `click` 里 `preventDefault()` 阻止勾选；星标也按不能用处理。点不了的开关和星标都不用 `disabled`：禁用的控件会吞掉点击，列表行就打不开详情了。列表行的点击处理只跳过没有 `aria-disabled` 的控件。
+- compat 标签的来源取自 `compatSources`；没有这个字段时按整体来源推算，Anthropic 协议的会话亲和字段没有手动设置时算作默认值。`override.compat` 里值为 `null` 的字段显示为带删除线的标签。
+- 测试消息的档位下拉框列出 `levels` 里除 `off` 以外的档位，选了档位时请求体带 `thinkingLevel`，结果按 `test.request.thinkingLevel` 显示实际发出的档位。
+
+### 其他约定
+
+- 星标用 SVG 画，字符 ★ 在部分系统上显示成彩色 emoji，颜色不受 CSS 控制。取消默认模型时请求体带上这颗星代表的模型，服务端返回 `defaultChanged` 时提示“pi 默认模型已经换了”。
+- 模型 id 过长时只截断 id 本身，星标和标签留在行内可见。
+- 密钥框用 `type="password"` 加 `autocomplete="one-time-code"`，免得 Chrome 把网站的已存密码填进来：密码框会忽略 `off`，`new-password` 会弹出生成密码。密钥框只出现在添加服务的表单里，已有服务的密钥在单独的密钥卡片里修改。
+- 添加服务时，`slugify()` 按显示名生成名字，用户手动改过名字后停止跟随，把名字清空后重新跟随；名字在失焦时去掉首尾空格并转为小写。添加表单里的“每个系列只保留最新版”默认勾选，提交时作为 `service.latestPerFamily` 发送；修改已有服务时不带这个字段。提交期间按钮显示“添加中…”或“保存中…”且不能点。
+- “每个系列只保留最新版”开关在“模型”页的前缀按钮一行里，紧挨“已启用”，旁边写明“已开启”或“未开启”，悬停时显示规则。服务的 `updates` 不为空时，左栏服务名旁显示“有新版”；开关关着时，“模型”页顶部显示横幅，列出替换，“换成新版”调用 `applyLatestOnce` 并提示换了哪些，“开启自动替换”调用 `setLatestPerFamily`。
+- 网址带 `service` 参数且服务存在时，打开页面后选中这个服务的“模型”页；否则选中第一个服务。
+- 刷新失败时，顶部已经显示“刷新失败：原因”，服务页头下方同样原因的错误条不再重复显示，关掉顶部提示后再显示。
+
+修改管理页时按 [`test/web-ui-checklist.md`](../test/web-ui-checklist.md) 逐条核对，那里列出了界面必须保留的行为和覆盖它们的测试。
 
 ## 依赖和导入
 
 - `@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent` 由 pi 提供，放在 `peerDependencies: "*"`。`devDependencies` 里的同名包只用于类型检查和测试。
+- 管理页用的 `preact` 和 `htm` 放在 `dependencies`，pi 安装 npm 或 git 插件时会一起安装。插件代码不导入它们，只由 `server.ts` 的 `VENDOR` 用 `createRequire()` 找到文件，原样提供给浏览器：`preact` 和 `preact/hooks` 按包的导出解析到 ESM 文件；`htm` 的 `require` 条件指向 UMD 文件，浏览器不能当模块导入，所以取同目录下的 `htm.module.js`。preact 11 只发布 ESM。`preact/hooks` 的文件里写的是裸模块名 `preact`，由页面的 import map 解析。升级这两个包后，确认这些文件路径仍然存在。
+- `happy-dom` 只用于前端的 DOM 测试。
 - pi 加载插件时把这些包名映射到宿主自己的副本。映射只覆盖包根和 `@earendil-works/pi-ai` 的 `compat`、`providers/all`、`oauth` 子路径，导入其他子路径会绕过映射。
 - 插件里的 `fetch` 在 pi 里会走 pi 配置的 HTTP 代理（pi 启动时替换全局 `fetch`）。单独用 Node 运行代码时，需要自己设置代理。
 - 只使用可以直接擦除的 TypeScript 语法（`tsconfig.json` 开启了 `erasableSyntaxOnly`），不用参数属性和 `enum`，这样代码也能被 Node 的类型擦除直接运行。
@@ -410,7 +462,8 @@ pi 的 `refreshModels`（`allowNetwork` 为真）目录刷新成功后调用 `mi
 - `endpoints.test.ts`：注册条件、停用服务、密钥和请求头的转义、环境变量、缓存、改名和删除、输入校验（含 compat 字段值为 `null`）、models.dev 的启动读取、是否需要下载、`refreshModels` 后台下载后重新注册且不循环、非对话模型不注册也不能启用、刷新期间的并发修改、多个 pi 进程、损坏的配置文件；以及经过服务商 `streamSimple`、由模拟 `fetch` 捕获的请求中，Anthropic 会话亲和头遵守默认值、手动开关和会话 ID 条件，`anthropic-beta` 同时含有 pi 生成的 beta 和插件追加的 beta。
 - `family.test.ts`：系列和版本的识别（前缀、`v` 开头、4 位及以上的日期段、拆开写的日期归一、无系列的名字、大小写、版本段的位置）、版本比较（含很长的数字），以及 `pickLatest()` 的规则：目录里没有的旧 id、系列在目录里没有成员、不降级、没有变化、别名消失时由同版本的 id 接替、目录里还在的同版本 id 都保留、带日期和不带日期的候选共存时选哪个（包括旧 id 从目录消失的情况）、拆开写的日期不会让新版被当成旧版。
 - `latest.test.ts`：“每系最新”的开关和执行时机。用一个模仿 pi 1.3 模型运行时的替身（重新注册会取消进行中的刷新，并让所有服务商做一次离线刷新）检查 `refreshModels` 里的迁移只改磁盘（配置和 pi 设置已改、内存和返回给 pi 的列表不变、不注册、发了提示）、同一批里快的服务迁移不影响慢的服务、两个服务同时迁移时 `enabledModels` 里两个旧项都换掉；还包括打开开关和管理页刷新只全量注册一次、管理页并行刷新时共享的 models.dev 下载不另外触发全量注册、管理页刷新（目录失败时也一样）后其他服务的地址、密钥和请求头按新配置注册、打开开关时保存失败内存不变、开关中途失败时后台 models.dev 更新照常注册、注册出错时记下原因并照常返回、注销出错时保留记录并在下次重试、刷新失败不执行、没有变化时不写文件、pi 联网刷新不替换内存状态、联网刷新写盘后管理页刷新读到新启用列表并只注册一次、管理页刷新时文件读不了就拒绝、隐藏和非对话模型不算新版、从没拿到过 models.dev 数据时推迟（包括只因开关才需要 models.dev 的服务）、缓存没有来源地址或来源地址不符时跳过、配置或密钥文件损坏时内存状态不变；以及 pi 默认模型和 `enabledModels` 的替换、`settings.json` 损坏时跳过。
-- `web.test.ts`：管理页的 token、Host 和 JSON 检查，各项操作（含“每系最新”的开关和刷新后的替换），刷新时等待 models.dev 及其失败不算刷新失败，测试消息的思考档位校验和发送，写入 pi 默认模型时保留其他设置、取消默认时核对页面带的默认模型、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
+- `web.test.ts`：管理页的 token、Host 和 JSON 检查，CSP 只放行 import map 的哈希，页面脚本、样式和第三方模块的提供方式（不要 token、检查 Host、htm 是 ES 模块、其他路径 404），响应编号递增，各项操作（含“每系最新”的开关和刷新后的替换），刷新时等待 models.dev 及其失败不算刷新失败，测试消息的思考档位校验和发送，写入 pi 默认模型时保留其他设置、取消默认时核对页面带的默认模型、拒绝写入损坏的 `settings.json`，以及版本比较和更新检查的缓存与失败处理。
+- `web-ui.test.ts`：管理页前端的 DOM 测试，在 happy-dom 里用 `startApp()` 启动页面，假的 `fetch` 按接口约定返回状态和 `X-Endpoints-Seq`。覆盖左栏的分组、默认选中的服务、`service` 网址参数和“有新版”角标；后台刷新时表单、密钥框和焦点保留，详情面板的生效参数跟着刷新；修改操作排队，先发后到的旧状态被丢弃、长时间刷新带回的新状态被采用，测试消息的结果只显示在发出时的模型上；冻结的显示；新版横幅的两个按钮、工具栏开关的位置和失败时拨回；添加服务时“每个系列只保留最新版”默认勾选并随请求发送；详情面板的 `aria-disabled` 星标、Esc 和未保存修改的确认、数字解析和错误位置、取消默认模型时的核对；以及 `parseCount()`、`versionOf()`、`prefixOf()`。界面上需要保留的其他行为列在 `test/web-ui-checklist.md`。
 
 `test/helpers.ts` 提供临时的 pi 配置目录和只记录注册调用的假 `ExtensionAPI`。models.dev 的数据和下载状态（失败时间、错误原因）是模块级的，同一个测试文件里的用例共用，所以会用到它的测试文件在 `beforeEach` 里调用 `setModelsDevForTest(undefined)` 清空。
 

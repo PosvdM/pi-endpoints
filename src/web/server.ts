@@ -1,7 +1,9 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
+import { dirname, join } from "node:path";
 import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { withBetas } from "../betas.ts";
@@ -18,6 +20,20 @@ export interface WebUI {
 }
 
 const PAGE = new URL("./page.html", import.meta.url);
+/** 页面自己的脚本和样式在 `src/web/app/` 下，只提供这一层里文件名符合 `APP_FILE` 的文件。 */
+const APP_DIR = new URL("./app/", import.meta.url);
+const APP_FILE = /^[a-z0-9-]+\.(?:js|css)$/;
+// 不命名为 require：转译成 CommonJS 的加载器里，模块作用域已经有同名参数。
+const resolveModule = createRequire(import.meta.url).resolve;
+/**
+ * 页面用到的第三方模块，从本插件的 dependencies 里找 ESM 文件。page.html 的 import map 把包名指向这些地址。
+ * htm 的 `require` 条件指向 UMD 文件，浏览器不能当模块导入，所以取同目录下的 `htm.module.js`。
+ */
+const VENDOR: Record<string, () => string> = {
+	"preact.js": () => resolveModule("preact"),
+	"hooks.js": () => resolveModule("preact/hooks"),
+	"htm.js": () => join(dirname(resolveModule("htm")), "htm.module.js"),
+};
 const MAX_BODY = 1024 * 1024;
 const TEST_TIMEOUT_MS = 60_000;
 
@@ -76,10 +92,16 @@ async function handle(endpoints: Endpoints, token: string, request: IncomingMess
 		response.writeHead(200, {
 			"Content-Type": "text/html; charset=utf-8",
 			"Cache-Control": "no-store",
-			"Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+			"Content-Security-Policy": pagePolicy(html),
 			"Referrer-Policy": "no-referrer",
 		});
 		response.end(html);
+		return;
+	}
+
+	// 脚本、样式和第三方模块不含密钥，不要求 token；Host 已经在上面检查过。
+	if (request.method === "GET" && (url.pathname.startsWith("/app/") || url.pathname.startsWith("/vendor/"))) {
+		sendStatic(response, url.pathname);
 		return;
 	}
 
@@ -101,7 +123,44 @@ async function handle(endpoints: Endpoints, token: string, request: IncomingMess
 	if (!request.headers["content-type"]?.startsWith("application/json")) throw new HttpError(415, "只接受 JSON");
 	const body = (await readBody(request)) as Record<string, unknown>;
 	const result = await action(endpoints, url.pathname.slice("/api/".length), body);
-	sendJson(response, 200, result ?? state(endpoints));
+	// 操作自己带回的状态（如刷新结果）在 await 之后才发出，这期间别的请求可能已经改了数据。
+	// 这里重新生成一次状态，保留操作附带的字段（refreshError、defaultChanged 等），让状态和 sendJson() 的编号在同一段同步代码里产生。
+	const services = result !== null && typeof result === "object" && "services" in result;
+	sendJson(response, 200, services ? { ...result, ...state(endpoints) } : (result ?? state(endpoints)));
+}
+
+/**
+ * 页面的 CSP：脚本和样式只能来自本机服务，内联脚本只放行 import map，按内容的 SHA-256 放行。
+ * 哈希在每次请求时按 page.html 的内容计算，改了 import map 不用同步改这里。
+ */
+export function pagePolicy(html: string): string {
+	const importMap = /<script type="importmap">([\s\S]*?)<\/script>/.exec(html)?.[1];
+	const hash = importMap === undefined ? "" : ` 'sha256-${createHash("sha256").update(importMap).digest("base64")}'`;
+	return `default-src 'none'; script-src 'self'${hash}; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+}
+
+function sendStatic(response: ServerResponse, pathname: string): void {
+	const [, dir, file = "", ...rest] = pathname.split("/");
+	let source: URL | string | undefined;
+	try {
+		if (rest.length === 0 && dir === "app" && APP_FILE.test(file)) source = new URL(file, APP_DIR);
+		else if (rest.length === 0 && dir === "vendor" && Object.hasOwn(VENDOR, file)) source = VENDOR[file]();
+	} catch {
+		// 依赖没装上时按文件不存在处理。
+	}
+	let body: Buffer;
+	try {
+		if (!source) throw new Error();
+		body = readFileSync(source);
+	} catch {
+		throw new HttpError(404, "没有这个文件");
+	}
+	response.writeHead(200, {
+		"Content-Type": file.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
+		"Cache-Control": "no-store",
+		"X-Content-Type-Options": "nosniff",
+	});
+	response.end(body);
 }
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
@@ -119,9 +178,19 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
 	}
 }
 
+/**
+ * 响应的编号，按生成顺序递增。调用方在同一段同步代码里生成状态并调用 sendJson()，编号大的状态就是更新的。
+ * 页面并发请求时，响应到达的顺序可能和生成顺序不同，页面只采用编号比已采用的大的状态。
+ */
+let responseSeq = 0;
+
 function sendJson(response: ServerResponse, status: number, value: unknown): void {
 	if (response.headersSent) return;
-	response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+	response.writeHead(status, {
+		"Content-Type": "application/json; charset=utf-8",
+		"Cache-Control": "no-store",
+		"X-Endpoints-Seq": String(++responseSeq),
+	});
 	response.end(JSON.stringify(value));
 }
 
