@@ -1,22 +1,39 @@
 // @ts-check
 // “服务设置”页和“添加服务”页：密钥卡片、服务表单和删除服务。
-// 表单的输入都是组件自己的状态，状态更新和后台刷新不会冲掉；调用方切换服务或点“添加服务”时换 key，表单重新开始。
+// 表单的输入是组件自己的状态，状态更新和后台刷新不会冲掉；同时写进调用方持有的 drafts，
+// 切到“模型”页再回来时从 drafts 恢复。调用方在切换服务、点“添加服务”或保存成功后丢掉草稿。
 import { useState } from "preact/hooks";
 import { html } from "./ui.js";
 import { parseJsonField, slugify } from "./util.js";
 
 /** @typedef {import("./util.js").Service} Service */
 /** @typedef {import("./store.js").Store} Store */
+/** @typedef {Map<string, any>} Drafts */
+
+/** 草稿在 drafts 里的键。 */
+export const draftKey = {
+	/** @param {string} [name] 已有服务的名字，添加服务时不传 */
+	service: (name) => `service:${name ?? ""}`,
+	/** @param {string} name */
+	key: (name) => `key:${name}`,
+};
 
 // one-time-code 让 Chrome 不把网站密码填进密钥框；off 对密码框无效，new-password 会弹出生成密码。
 /** @param {{ value: string; placeholder: string; onInput: (value: string) => void }} props */
 const KeyInput = ({ value, placeholder, onInput }) =>
 	html`<input class="input" type="password" placeholder=${placeholder} autocomplete="one-time-code" data-1p-ignore data-bwignore data-lpignore="true" value=${value} onInput=${(/** @type {Event} */ event) => onInput(/** @type {HTMLInputElement} */ (event.currentTarget).value)} />`;
 
-/** @param {{ store: Store; service: Service }} props */
-export function KeyCard({ store, service }) {
+/** @param {{ store: Store; service: Service; drafts: Drafts }} props */
+export function KeyCard({ store, service, drafts }) {
 	// 保存失败时已填的密钥留在框里。
-	const [value, setValue] = useState("");
+	const draft = draftKey.key(service.name);
+	const [value, setValueState] = useState(() => /** @type {string} */ (drafts.get(draft) ?? ""));
+	/** @param {string} next */
+	const setValue = (next) => {
+		if (next) drafts.set(draft, next);
+		else drafts.delete(draft);
+		setValueState(next);
+	};
 	const status = service.status;
 	const text = status?.keySource === "env" ? `已设置，来自环境变量 ${service.apiKeyEnv}，优先于文件里的密钥` : status?.keySource === "file" ? "已设置，保存在本机文件" : "未设置";
 	const save = async () => {
@@ -37,27 +54,41 @@ export function KeyCard({ store, service }) {
 }
 
 /**
- * 添加服务（`service` 为 undefined）或修改已有服务的表单。保存成功后调用 `onSaved(新服务名)`。
- * @param {{ store: Store; service?: Service; onSaved: (name: string) => void }} props
+ * 添加服务（`service` 为 undefined）或修改已有服务的表单。保存成功后丢掉草稿，调用 `onSaved(新服务名)`。
+ * @param {{ store: Store; service?: Service; drafts: Drafts; onSaved: (name: string) => void }} props
  */
-export function ServiceForm({ store, service, onSaved }) {
+export function ServiceForm({ store, service, drafts, onSaved }) {
 	const isNew = !service;
-	const [values, setValues] = useState(() => ({
-		name: service?.name ?? "",
-		displayName: service?.displayName ?? "",
-		baseUrl: service?.baseUrl ?? "",
-		defaultApi: service?.defaultApi ?? "",
-		apiKey: "",
-		apiKeyEnv: service?.apiKeyEnv ?? "",
-		headers: service && Object.keys(service.headers).length ? JSON.stringify(service.headers, null, 2) : "",
-		// 添加服务时默认打开“每系最新”。已有服务的开关在模型页，不在这个表单里。
-		latestPerFamily: true,
-	}));
+	const draft = draftKey.service(service?.name);
+	const saved = drafts.get(draft);
+	const [values, setValues] = useState(() => {
+		const fresh = {
+			name: service?.name ?? "",
+			displayName: service?.displayName ?? "",
+			baseUrl: service?.baseUrl ?? "",
+			defaultApi: service?.defaultApi ?? "",
+			apiKey: "",
+			apiKeyEnv: service?.apiKeyEnv ?? "",
+			headers: service && Object.keys(service.headers).length ? JSON.stringify(service.headers, null, 2) : "",
+			// 添加服务时默认打开“每系最新”。已有服务的开关在模型页，不在这个表单里。
+			latestPerFamily: true,
+		};
+		return /** @type {typeof fresh} */ (saved?.values ?? fresh);
+	});
 	// 添加服务时，名字跟着显示名生成，直到用户自己改名字；把名字清空后重新跟随。
-	const [nameTouched, setNameTouched] = useState(false);
+	const [nameTouched, setNameTouchedState] = useState(() => /** @type {boolean} */ (saved?.nameTouched ?? false));
 	const [busy, setBusy] = useState(false);
 	/** @param {Partial<typeof values>} patch */
-	const update = (patch) => setValues((previous) => ({ ...previous, ...patch }));
+	const update = (patch) => setValues((previous) => {
+		const next = { ...previous, ...patch };
+		drafts.set(draft, { values: next, nameTouched: drafts.get(draft)?.nameTouched ?? nameTouched });
+		return next;
+	});
+	/** @param {boolean} touched */
+	const setNameTouched = (touched) => {
+		drafts.set(draft, { values: drafts.get(draft)?.values ?? values, nameTouched: touched });
+		setNameTouchedState(touched);
+	};
 	/** @param {keyof typeof values} key */
 	const text = (key) => ({
 		value: values[key],
@@ -93,7 +124,10 @@ export function ServiceForm({ store, service, onSaved }) {
 		setBusy(true);
 		const data = await store.act("saveService", body, { okText: isNew ? "已添加" : "已保存" });
 		setBusy(false);
-		if (data) onSaved(name);
+		if (data) {
+			drafts.delete(draft);
+			onSaved(name);
+		}
 	};
 
 	return html`<div class="card">

@@ -52,6 +52,7 @@ export function visibleModels(models, view, frozen, service) {
 
 /**
  * 服务有待换的新版、开关又关着时，在模型页顶部提示，可以换一次或打开开关。
+ * 调用方以服务名为 key 渲染，“替换中…”只属于发起替换的服务。
  * @param {{ store: Store; service: Service }} props
  */
 function LatestBanner({ store, service }) {
@@ -83,7 +84,7 @@ const LATEST_TITLE = "开启后，已启用模型所在的每个系列只保留�
  */
 function LatestToggle({ store, service }) {
 	const key = pendingKey.latest(service.name);
-	const on = store.get().pending.get(key) ?? service.latestPerFamily;
+	const on = store.pendingValue(key) ?? service.latestPerFamily;
 	/** @param {Event} event */
 	const change = (event) => {
 		const next = /** @type {HTMLInputElement} */ (event.currentTarget).checked;
@@ -195,7 +196,7 @@ export function ModelsPage({ store, service, view, setView, frozen, collapsed, t
 	}
 
 	return html`<div>
-		<${LatestBanner} store=${store} service=${service} />
+		<${LatestBanner} key=${service.name} store=${store} service=${service} />
 		<div class="toolbar">
 			<div class="search"><${SearchIcon} /><input class="input" type="search" value=${view.text} placeholder="搜索模型 id 或名称" onInput=${(/** @type {Event} */ event) => setView({ text: /** @type {HTMLInputElement} */ (event.currentTarget).value })} /></div>
 			<select class="input" value=${view.api} onChange=${(/** @type {Event} */ event) => setView({ api: /** @type {HTMLSelectElement} */ (event.currentTarget).value })}>${options(models.map((model) => model.api.value), "全部协议")}</select>

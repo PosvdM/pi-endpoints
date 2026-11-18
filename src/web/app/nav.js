@@ -32,7 +32,7 @@ export function Nav({ store, services, parked, current, onSelect, onAdd }) {
 	/** @param {Service} item */
 	const row = (item) => {
 		const key = pendingKey.disabled(item.name);
-		const disabled = store.get().pending.get(key) ?? Boolean(item.status?.disabled);
+		const disabled = store.pendingValue(key) ?? Boolean(item.status?.disabled);
 		/** @param {Event} event */
 		const toggle = async (event) => {
 			const next = !(/** @type {HTMLInputElement} */ (event.currentTarget).checked);

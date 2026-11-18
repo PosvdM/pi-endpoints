@@ -73,7 +73,10 @@ export function App({ store, initialService }) {
 	const [openModel, setOpenModel] = useState(/** @type {string | null} */ (null));
 	const [view, setViewState] = useState(EMPTY_VIEW);
 	const [collapsed, setCollapsed] = useState(() => new Set());
-	// 切换服务或点“添加服务”时加一，表单以它为 key 重新开始，丢掉没保存的输入。
+	// 服务表单和密钥框里没保存的内容，键见 settings.js 的 draftKey。切到“模型”页再回来时保留；
+	// 切换服务、点“添加服务”或保存成功后丢掉。
+	const drafts = useRef(/** @type {import("./settings.js").Drafts} */ (new Map())).current;
+	// 表单重新开始时加一（点“添加服务”、保存成功后按服务端返回的值重填），表单以它为 key 重新挂载。
 	const [formEpoch, setFormEpoch] = useState(0);
 	const [loadFailure, setLoadFailure] = useState(/** @type {string | null} */ (null));
 	// 本次打开页面期间的冻结状态，见 serviceGroups() 和 visibleModels()。
@@ -98,6 +101,9 @@ export function App({ store, initialService }) {
 	const setView = (patch) => setViewState((previous) => ({ ...previous, ...patch }));
 	/** @param {string} name */
 	const select = (name) => {
+		// 离开服务时，模型表按新服务的条件重新选；同一个服务里切换标签页时保留。
+		if (name !== current) frozen.key = "";
+		drafts.clear();
 		setCurrent(name);
 		setTab("models");
 		// 筛选条件按服务各自的模型生成，换服务后不再适用。
@@ -107,6 +113,8 @@ export function App({ store, initialService }) {
 		store.setError(null);
 	};
 	const add = () => {
+		frozen.key = "";
+		drafts.clear();
 		setCurrent("");
 		setOpenModel(null);
 		setFormEpoch((n) => n + 1);
@@ -135,7 +143,7 @@ export function App({ store, initialService }) {
 	} else if (current === "" || (!service && data.services.length === 0)) {
 		parts.push(html`<div class="head"><div class="info"><h1>添加服务</h1>
 			<div class="facts">填好地址和密钥，添加后会自动拉取模型目录，再勾选要启用的模型。</div></div></div>`);
-		parts.push(html`<${ServiceForm} key=${`new/${formEpoch}`} store=${store} onSaved=${(/** @type {string} */ name) => {
+		parts.push(html`<${ServiceForm} key=${`new/${formEpoch}`} store=${store} drafts=${drafts} onSaved=${(/** @type {string} */ name) => {
 			setCurrent(name);
 			setTab("models");
 		}} />`);
@@ -160,10 +168,16 @@ export function App({ store, initialService }) {
 			parts.push(html`<${ModelsPage} store=${store} service=${service} view=${view} setView=${setView} frozen=${frozen}
 				collapsed=${collapsed} toggleGroup=${toggleGroup} openModel=${openModel} onOpen=${setOpenModel} />`);
 		} else {
-			parts.push(html`<${KeyCard} key=${`key/${service.name}/${formEpoch}`} store=${store} service=${service} />`);
-			parts.push(html`<${ServiceForm} key=${`edit/${service.name}/${formEpoch}`} store=${store} service=${service} onSaved=${(/** @type {string} */ name) => setCurrent(name)} />`);
+			parts.push(html`<${KeyCard} key=${`key/${service.name}`} store=${store} service=${service} drafts=${drafts} />`);
+			parts.push(html`<${ServiceForm} key=${`edit/${service.name}/${formEpoch}`} store=${store} service=${service} drafts=${drafts} onSaved=${(/** @type {string} */ name) => {
+				// 按服务端保存的值（规范化后的地址等）重填表单。
+				setCurrent(name);
+				setFormEpoch((n) => n + 1);
+			}} />`);
 			parts.push(html`<${DangerCard} store=${store} service=${service} onRemoved=${() => {
 				parked.delete(service.name);
+				frozen.key = "";
+				drafts.clear();
 				setCurrent(firstService());
 				setTab("models");
 				setOpenModel(null);
@@ -191,10 +205,18 @@ export function App({ store, initialService }) {
  * 在 `root` 里启动管理页。
  * @param {Element} root
  * @param {{ token: string; search?: string; fetch?: typeof globalThis.fetch }} options
+ * @returns {{ store: Store; stop: () => void }} `stop()` 卸载页面并移除挂在 document 上的监听
  */
 export function startApp(root, { token, search = "", fetch: fetchImpl }) {
 	const store = createStore({ token, fetch: fetchImpl });
+	const untrack = store.trackPointer(root.ownerDocument);
 	const initialService = new URLSearchParams(search).get("service");
 	render(html`<${App} store=${store} initialService=${initialService} />`, root);
-	return store;
+	return {
+		store,
+		stop: () => {
+			untrack();
+			render(null, root);
+		},
+	};
 }
