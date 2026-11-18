@@ -704,7 +704,7 @@ describe("写操作和刷新的顺序", () => {
 		slowWrite.resolve(server.current);
 		await settle();
 		expect(server.posts().map((call) => call.path)).toEqual(["setServiceDisabled", "setEnabled", "refresh"]);
-		expect(server.posts()[2].body).toEqual({ name: "a", latestPerFamily: false });
+		expect(server.posts()[2].body).toEqual({ name: "a" });
 	});
 
 	it("同一开关连续“开 → 关”，第一个请求先完成时开关仍显示关", async () => {
@@ -933,21 +933,122 @@ describe("刷新前的修改失败", () => {
 		expect($(".toast")?.textContent).toBe("目录已刷新");
 	});
 
-	it("所有刷新都带上页面显示的“每系最新”开关值", async () => {
+	it("自动刷新在没动过“每系最新”开关时不带 latestPerFamily，动过后按保守规则带上", async () => {
 		const server = fakeServer(state([service("a", [], { latestPerFamily: true }), service("b", [])]));
 		await open(server);
-		// 打开页面时的后台刷新。
-		expect(server.posts().map((call) => call.body)).toEqual([{ name: "a", latestPerFamily: true }, { name: "b", latestPerFamily: false }]);
+		// 打开页面时的后台刷新，服务端按磁盘上的配置执行。
+		expect(server.posts().map((call) => call.body)).toEqual([{ name: "a" }, { name: "b" }]);
 		server.calls.length = 0;
+		const services = (disabled: Json = {}, latest = true) => state([
+			service("a", [], { latestPerFamily: latest, status: { keySource: "file", disabled: disabled.a } }),
+			service("b", [], { status: { keySource: "file", disabled: disabled.b } }),
+		]);
+		server.handlers.setLatestPerFamily = (body) => (server.current = services({}, body?.latestPerFamily));
+		toggle($(".latest-toggle input"));
+		await settle();
+		// 停用再重新启用两个服务：b 没动过开关，a 动过。
+		for (const index of [1, 0]) {
+			server.handlers.setServiceDisabled = (body) => (server.current = services({ [body?.name]: body?.disabled }, false));
+			toggle($$(".svc .switch")[index]);
+			await settle();
+			toggle($$(".svc .switch")[index]);
+			await settle();
+		}
+		expect(server.posts().filter((call) => call.path === "refresh").map((call) => call.body)).toEqual([{ name: "b" }, { name: "a", latestPerFamily: false }]);
+	});
+
+	it("手动刷新始终带上 latestPerFamily，各来源都为开时才为 true", async () => {
+		const server = fakeServer(state([service("a", [], { latestPerFamily: true })]));
+		await open(server);
+		server.calls.length = 0;
+		byText(".head .btn", "刷新目录")?.click();
+		await settle();
+		expect(server.posts().at(-1)?.body).toEqual({ name: "a", latestPerFamily: true });
 		// 开关正在提交时按待提交的值。
 		const slow = deferred<Json>();
 		server.handlers.setLatestPerFamily = () => slow.promise;
 		toggle($(".latest-toggle input"));
 		await settle();
 		byText(".head .btn", "刷新目录")?.click();
-		slow.resolve(server.current = state([service("a", [], { latestPerFamily: false }), service("b", [])]));
+		slow.resolve(server.current = state([service("a", [], { latestPerFamily: false })]));
 		await settle();
 		expect(server.posts().at(-1)?.body).toEqual({ name: "a", latestPerFamily: false });
+	});
+
+	it("开关写入失败后、还没有成功的写入前，手动刷新按关", async () => {
+		const server = fakeServer(state([service("a", [], { latestPerFamily: true })]));
+		await open(server);
+		server.calls.length = 0;
+		server.handlers.setLatestPerFamily = () => ({ status: 500, error: "写入失败" });
+		toggle($(".latest-toggle input"));
+		await settle();
+		// 页面已经拨回“已开启”，状态里也是开着的。
+		expect(($(".latest-toggle input") as HTMLInputElement).checked).toBe(true);
+		const refreshBody = async () => {
+			byText(".head .btn", "刷新目录")?.click();
+			await settle();
+			return server.posts().filter((call) => call.path === "refresh").at(-1)?.body;
+		};
+		expect(await refreshBody()).toEqual({ name: "a", latestPerFamily: false });
+		server.handlers.setLatestPerFamily = (body) => (server.current = state([service("a", [], { latestPerFamily: body?.latestPerFamily })]));
+		toggle($(".latest-toggle input"));
+		await settle();
+		toggle($(".latest-toggle input"));
+		await settle();
+		expect(await refreshBody()).toEqual({ name: "a", latestPerFamily: true });
+	});
+
+	it("复选框实际没勾选时，即使状态里是开着的，手动刷新也按关", async () => {
+		const server = fakeServer(state([service("a", [], { latestPerFamily: true })]));
+		await open(server);
+		server.calls.length = 0;
+		($(".latest-toggle input") as HTMLInputElement).checked = false;
+		byText(".head .btn", "刷新目录")?.click();
+		await settle();
+		expect(server.posts().at(-1)?.body).toEqual({ name: "a", latestPerFamily: false });
+	});
+
+	it("按着指针时用键盘关掉开关后切到“服务设置”，复选框不在了，刷新仍按最新的状态取关", async () => {
+		const server = fakeServer(state([service("relay", [], { latestPerFamily: true })]));
+		await open(server);
+		server.calls.length = 0;
+		const slow = deferred<Json>();
+		server.handlers.setLatestPerFamily = () => slow.promise;
+		document.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, bubbles: true }));
+		($(".latest-toggle input") as HTMLInputElement).click();
+		await settle();
+		byText(".tab", "服务设置")?.click();
+		await settle();
+		expect($(".latest-toggle input")).toBeNull();
+		byText(".head .btn", "刷新目录")?.click();
+		await settle();
+		slow.resolve(server.current = state([service("relay", [], { latestPerFamily: false })]));
+		await settle();
+		expect(server.posts().find((call) => call.path === "refresh")?.body).toEqual({ name: "relay", latestPerFamily: false });
+		document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true }));
+		await settle();
+	});
+
+	it("按着指针时用键盘关掉开关、写入失败，随后点刷新：按关发出", async () => {
+		const server = fakeServer(state([service("relay", [model("gpt-6-sol", { enabled: true })], { latestPerFamily: true })]));
+		await open(server);
+		server.calls.length = 0;
+		const slow = deferred<Json>();
+		server.handlers.setLatestPerFamily = () => slow.promise;
+		const button = byText(".head .btn", "刷新目录") as HTMLElement;
+		document.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, bubbles: true }));
+		// 键盘的空格在复选框上触发 click：复选框立刻变成没勾选，待提交值只进了最新的快照。
+		const input = $(".latest-toggle input") as HTMLInputElement;
+		input.focus();
+		input.click();
+		await settle();
+		expect(input.checked).toBe(false);
+		slow.resolve(Promise.reject(new TypeError("Failed to fetch")) as unknown as Json);
+		await settle();
+		document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true }));
+		button.click();
+		await settle();
+		expect(server.posts().find((call) => call.path === "refresh")?.body).toEqual({ name: "relay", latestPerFamily: false });
 	});
 
 	it("按下“刷新目录”期间关闭失败，松开后的点击先于重画：刷新按页面显示的“关”发出", async () => {

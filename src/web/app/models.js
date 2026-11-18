@@ -1,6 +1,6 @@
 // @ts-check
 // “模型”页：新版提示、工具栏、前缀按钮、按前缀分组的模型表和图例。
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { Caret, Dot, EnableSwitch, html, SearchIcon, Star } from "./ui.js";
 import { pendingKey } from "./store.js";
 import { byPrefix, describeReplacements, ENABLED, full, newestFirst, nonChat, PARAM_SOURCES, prefixOf, short, SOURCE } from "./util.js";
@@ -85,13 +85,16 @@ const LATEST_TITLE = "开启后，已启用模型所在的每个系列只保留�
 function LatestToggle({ store, service }) {
 	const key = pendingKey.latest(service.name);
 	const on = store.pendingValue(key) ?? service.latestPerFamily;
+	// 刷新时读复选框的实际状态：按着指针时用键盘切换，复选框已经变了，页面还没重画。
+	const input = useRef(/** @type {HTMLInputElement | null} */ (null));
+	useEffect(() => store.watchLatestToggle(service.name, () => input.current?.checked ?? true), [store, service.name]);
 	/** @param {Event} event */
 	const change = (event) => {
 		const next = /** @type {HTMLInputElement} */ (event.currentTarget).checked;
 		store.act("setLatestPerFamily", { name: service.name, latestPerFamily: next }, { okText: next ? "已开启" : "已关闭", pending: [key, next] });
 	};
 	return html`<label class=${`latest-toggle${on ? " on" : ""}`} title=${LATEST_TITLE}>
-		<input type="checkbox" class="switch" checked=${on} onChange=${change} />
+		<input ref=${input} type="checkbox" class="switch" checked=${on} onChange=${change} />
 		每个系列只保留最新版
 		<span class="state">${on ? "已开启" : "未开启"}</span>
 	</label>`;

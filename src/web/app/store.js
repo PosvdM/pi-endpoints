@@ -55,6 +55,14 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	// 刷新据此判断排在它前面的修改有没有失败，见 refresh()。
 	/** @type {Set<{ services: string[]; error: Snapshot["error"] }>} */
 	const writes = new Set();
+	// 本次打开页面期间动过“每系最新”开关（发过 setLatestPerFamily）的服务，以及其中最后一次写入失败的服务。见 refreshLatest()。
+	/** @type {Set<string>} */
+	const latestTouched = new Set();
+	/** @type {Set<string>} */
+	const latestFailed = new Set();
+	// 模型页工具栏里“每系最新”复选框的实际勾选状态，按服务名登记，见 watchLatestToggle()。
+	/** @type {Map<string, () => boolean>} */
+	const latestToggles = new Map();
 	// 指针按下期间为 true，只推迟发布，见 trackPointer()。
 	let holding = false;
 
@@ -137,6 +145,8 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 			error: /** @type {Snapshot["error"]} */ (null),
 		};
 		writes.add(entry);
+		const latestOf = path === "setLatestPerFamily" && typeof body.name === "string" ? body.name : null;
+		if (latestOf) latestTouched.add(latestOf);
 		const run = async () => {
 			try {
 				const { result, seq } = await request(path, body);
@@ -147,10 +157,12 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 					okMark: ++ids,
 					...(options.okText && !result.refreshError ? { toast: { text: options.okText, id: ++ids } } : {}),
 				}));
+				if (latestOf) latestFailed.delete(latestOf);
 				return result;
 			} catch (failure) {
 				const error = errorOf(messageOf(failure));
 				entry.error = error;
+				if (latestOf) latestFailed.add(latestOf);
 				update((current) => ({ ...clearPending(current), error }));
 				return undefined;
 			} finally {
@@ -163,16 +175,32 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	}
 
 	/**
-	 * 页面显示的“每系最新”开关值：发布的快照里的待提交值或服务的值。服务还没发布时（按着指针时打开页面）取最新的状态；
-	 * 找不到服务时为 undefined。
+	 * 刷新请求里的 latestPerFamily。为 false 时服务端这次不执行“每系最新”的替换，不传时按磁盘上的配置执行。
+	 * 拿不准用户意图时就不替换：漏换没有害处，下次刷新或 pi 联网刷新会补上；误换会改掉用户的 pi 默认模型。
+	 * - 自动刷新（`auto`，打开页面和重新启用服务后）：本次打开页面期间没动过这个服务的开关时不传，服务端按刚重新读取的
+	 *   磁盘配置执行。页面拿到的状态可能落后于磁盘（例如另一个 pi 刚打开了开关），传 false 会漏掉这次替换。
+	 * - 其余情况下，以下各项都为开时才为 true：发布的快照和最新的快照里服务的值和待提交值、工具栏复选框的实际勾选状态
+	 *   （模型页没挂载时不算这一项），以及这个服务最后一次开关写入没有失败。按住指针时用键盘切换开关，复选框已经变了，
+	 *   待提交值还没发布；写入失败后状态里又是开着的，所以要把这些来源都算上。找不到服务时为 false。
 	 * @param {string} name
+	 * @param {boolean} auto
+	 * @returns {boolean | undefined}
 	 */
-	function shownLatest(name) {
-		const pending = published.pending.get(pendingKey.latest(name));
-		if (pending) return pending.value;
-		/** @param {Snapshot} snapshot */
-		const find = (snapshot) => snapshot.data.services.find((item) => item.name === name);
-		return (find(published) ?? find(latest))?.latestPerFamily;
+	function refreshLatest(name, auto) {
+		if (auto && !latestTouched.has(name)) return undefined;
+		/** @type {boolean[]} */
+		const values = [];
+		for (const snapshot of [published, latest]) {
+			const pending = snapshot.pending.get(pendingKey.latest(name));
+			if (pending) values.push(pending.value);
+			const found = snapshot.data.services.find((item) => item.name === name);
+			if (found) values.push(found.latestPerFamily === true);
+		}
+		if (!values.length) return false;
+		const read = latestToggles.get(name);
+		if (read) values.push(read());
+		values.push(!latestFailed.has(name));
+		return values.every(Boolean);
 	}
 
 	/**
@@ -180,8 +208,8 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	 * 免得越过还没提交的修改（例如刚关掉的开关）。其中涉及这个服务的修改只要有一个失败，磁盘上的配置就不是用户要的，
 	 * 这次刷新取消，不发请求；其他服务的修改失败不影响。取消时顶部显示那个修改的错误（沿用原来的编号）：
 	 * 期间别的修改成功会清掉顶部错误，用户就看不到刷新为什么没发；顶部已经有更新的错误时保留更新的。
-	 * 请求里带上发起刷新时页面显示的“每系最新”开关值（latestPerFamily，含待提交值），为 false 时服务端不替换模型。
-	 * 前端的等待和取消挡不住所有交错（例如按住指针期间修改失败，松开后的点击先于发布），由服务端按这个值兜底。
+	 * 前端的等待和取消挡不住所有交错（例如按住指针期间修改失败，松开后的点击先于发布），所以请求里按 refreshLatest()
+	 * 带上 latestPerFamily，由服务端兜底。
 	 * 刷新可能要等一分钟，本身不进队列，之后的修改操作不用等它；过期的状态由编号挡住。
 	 * 后台刷新（打开页面和重新启用服务时）的失败原因只记在服务状态里，不弹顶部提示；连不上管理页本身（如 pi 已退出）时也不打扰。
 	 * @param {string} name
@@ -190,8 +218,8 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 	async function refresh(name, { background = false } = {}) {
 		if (latest.refreshing.has(name)) return undefined;
 		const ahead = [...writes].filter((entry) => entry.services.includes(name));
-		const shown = shownLatest(name);
-		const body = { name, ...(typeof shown === "boolean" ? { latestPerFamily: shown } : {}) };
+		const latestPerFamily = refreshLatest(name, background);
+		const body = { name, ...(latestPerFamily === undefined ? {} : { latestPerFamily }) };
 		// 刷新成功只清掉发起刷新时页面上显示的那条顶部错误。之后出现的错误（如排在前面的修改失败）用户可能还没看到，留着。
 		const seenError = published.error;
 		update((current) => ({ refreshing: new Set(current.refreshing).add(name) }));
@@ -244,6 +272,17 @@ export function createStore({ token, fetch: fetchImpl = (...args) => globalThis.
 		},
 		act,
 		refresh,
+		/**
+		 * 登记服务的“每系最新”复选框，刷新时读它的实际勾选状态，见 refreshLatest()。返回取消登记的函数。
+		 * @param {string} name
+		 * @param {() => boolean} read
+		 */
+		watchLatestToggle(name, read) {
+			latestToggles.set(name, read);
+			return () => {
+				if (latestToggles.get(name) === read) latestToggles.delete(name);
+			};
+		},
 		/**
 		 * 开关正在提交的值，没有在提交时为 undefined。
 		 * @param {string} key
