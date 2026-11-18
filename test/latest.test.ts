@@ -29,6 +29,7 @@ beforeEach(() => {
 afterEach(() => {
 	temp.cleanup();
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 const configFile = () => join(temp.dir, "endpoints.json");
@@ -569,7 +570,7 @@ describe("新版提醒", () => {
 		]);
 		expect(readConfig().services[0].enabled).toEqual(["gpt-6.1-sol"]);
 		expect(JSON.parse(readFileSync(settingsFile(), "utf8")).defaultModel).toBe("gpt-6.1-sol");
-		expect(readState()).toEqual({ notifiedUpdates: { cpa: [{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }] } });
+		expect(readState()).toEqual({ notifiedUpdates: { cpa: [{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: expect.any(Number) }] } });
 		await tick();
 		expect(registrations()).toBe(before);
 
@@ -587,7 +588,7 @@ describe("新版提醒", () => {
 		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-sol"];
 		await refreshModels();
 		expect(notes.map(([message]) => message)[1]).toContain("gpt-6.1-sol → gpt-6.3-sol");
-		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.3-sol" }]);
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.3-sol", at: expect.any(Number) }]);
 
 		// 用户自己换成新版后没有待处理的替换，记录清掉。
 		endpoints.setEnabled("cpa", "gpt-6.1-sol", false);
@@ -595,6 +596,52 @@ describe("新版提醒", () => {
 		await refreshModels();
 		expect(notes).toHaveLength(2);
 		expect(readState()).toEqual({ notifiedUpdates: {} });
+	});
+
+	it("同一个替换最多每 7 天提示一次：7 天内不重复，7 天后再提示，换掉旧版后清除记录", async () => {
+		const day = 24 * 60 * 60 * 1000;
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		const notes = listen(endpoints);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		await refreshModels();
+		expect(notes).toHaveLength(1);
+		const first = now;
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: first }]);
+
+		now = first + 7 * day - 1;
+		await refreshModels();
+		expect(notes).toHaveLength(1);
+
+		now = first + 7 * day;
+		await refreshModels();
+		expect(notes).toHaveLength(2);
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: now }]);
+
+		// 7 天后那次没有界面：不显示，也不更新时间，下次有界面时再提示。
+		now += 7 * day;
+		listen(endpoints, false);
+		await refreshModels();
+		expect(readState().notifiedUpdates.cpa[0].at).toBe(first + 7 * day);
+
+		// 用户换成新版后不再待处理，记录清除。
+		endpoints.setEnabled("cpa", "gpt-6.1-sol", false);
+		endpoints.setEnabled("cpa", "gpt-6.2-sol", true);
+		await refreshModels();
+		expect(readState()).toEqual({ notifiedUpdates: {} });
+	});
+
+	it("没有时间的旧记录按已到期处理，再提示一次并补上时间", async () => {
+		const { endpoints, catalogs, refreshModels } = await setup(["gpt-6.1-sol"], ["gpt-6.1-sol"]);
+		catalogs["cpa.test"].ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
+		writeFileSync(stateFile(), JSON.stringify({ notifiedUpdates: { cpa: [{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }] } }));
+		const notes = listen(endpoints);
+		await refreshModels();
+		expect(notes).toHaveLength(1);
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: expect.any(Number) }]);
+		await refreshModels();
+		expect(notes).toHaveLength(1);
 	});
 
 	it("同一服务的多个替换拼成一条，没有显示名时用服务名", async () => {
@@ -628,7 +675,7 @@ describe("新版提醒", () => {
 		const notes = listen(endpoints);
 		await refreshModels();
 		expect(notes).toHaveLength(1);
-		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+		expect(readState().notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: expect.any(Number) }]);
 	});
 
 	it("目录刷新失败时不提示；记录文件损坏时按空处理，再提示一次", async () => {
@@ -672,7 +719,7 @@ describe("新版提醒", () => {
 		expect(existsSync(stateFile())).toBe(false);
 		expect(await runtime.refreshAll(["constructor"])).toEqual(["published"]);
 		expect(notes).toHaveLength(1);
-		expect(readState().notifiedUpdates.constructor).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+		expect(readState().notifiedUpdates.constructor).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: expect.any(Number) }]);
 		await runtime.refreshAll(["constructor"]);
 		expect(notes).toHaveLength(1);
 	});

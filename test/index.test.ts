@@ -6,12 +6,14 @@ import { browserCommand, pageUrl } from "../src/commands.ts";
 import { Endpoints } from "../src/endpoints.ts";
 import piEndpoints from "../src/index.ts";
 import { setModelsDevForTest } from "../src/modelsdev.ts";
+import { resetContextsForTest } from "../src/notify.ts";
 import { fakePi, useTempAgentDir } from "./helpers.ts";
 
 let temp: ReturnType<typeof useTempAgentDir>;
 let ids: string[];
 
 beforeEach(() => {
+	resetContextsForTest();
 	temp = useTempAgentDir();
 	setModelsDevForTest(undefined);
 	ids = ["gpt-6.1-sol", "gpt-6.2-sol"];
@@ -66,10 +68,49 @@ describe("插件入口的提示", () => {
 		emit("session_start", { hasUI: true, ui: { notify } });
 		await refresh();
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("Magpie 有新版模型：gpt-6.1-sol → gpt-6.2-sol"), "warning");
-		expect(JSON.parse(readFileSync(stateFile(), "utf8")).notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol" }]);
+		expect(JSON.parse(readFileSync(stateFile(), "utf8")).notifiedUpdates.cpa).toEqual([{ from: "gpt-6.1-sol", to: "gpt-6.2-sol", at: expect.any(Number) }]);
 
 		await refresh();
 		expect(notify).toHaveBeenCalledTimes(1);
+	});
+
+	it("pi-web-ui 的后台会话（headless 的界面）不提示，也不记成已提示", async () => {
+		const { emit, refresh } = load();
+		const notify = vi.fn();
+		emit("session_start", { hasUI: true, mode: "rpc", ui: { headless: true, notify } });
+		await refresh();
+		expect(notify).not.toHaveBeenCalled();
+		expect(existsSync(stateFile())).toBe(false);
+	});
+
+	it("同一进程里后加载的后台会话接管刷新时，提示仍显示在有界面的会话里；那个会话结束后不再记录", async () => {
+		// 模仿 pi-web-ui：主会话和子代理各加载一份插件，共用一个模型运行时，后注册的接管 refreshModels。
+		const main = load();
+		const shown = vi.fn();
+		main.emit("session_start", { hasUI: true, mode: "rpc", ui: { headless: false, notify: shown } });
+		const sub = load();
+		const dropped = vi.fn();
+		sub.emit("session_start", { hasUI: true, mode: "rpc", ui: { headless: true, notify: dropped } });
+		await sub.refresh();
+		expect(dropped).not.toHaveBeenCalled();
+		expect(shown).toHaveBeenCalledWith(expect.stringContaining("gpt-6.1-sol → gpt-6.2-sol"), "warning");
+		expect(existsSync(stateFile())).toBe(true);
+
+		main.emit("session_shutdown", {});
+		ids = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-sol"];
+		await sub.refresh();
+		// 6.1 → 6.3 没有显示，不记录；6.1 → 6.2 已经不待处理，记录去掉。
+		expect(shown).toHaveBeenCalledTimes(1);
+		expect(JSON.parse(readFileSync(stateFile(), "utf8")).notifiedUpdates.cpa).toBeUndefined();
+	});
+
+	it("已经失效的会话上下文访问时抛错，跳过它，按没有界面处理", async () => {
+		const { emit, refresh } = load();
+		const ctx = { hasUI: true, ui: { notify: vi.fn() } };
+		emit("session_start", ctx);
+		Object.defineProperty(ctx, "ui", { get: () => { throw new Error("stale"); } });
+		await refresh();
+		expect(existsSync(stateFile())).toBe(false);
 	});
 
 	it("会话结束后不再用旧的界面", async () => {
