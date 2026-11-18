@@ -238,8 +238,9 @@ export class Endpoints {
 	}
 
 	/**
-	 * 需要时开始更新 models.dev，并发的调用共用同一个任务。`register` 为真时，拿到新数据后由任务自己全量注册；
-	 * 为假时由调用方通过 `waitModelsDev()` 返回的函数认领这次注册。`always` 为真时不检查是否需要。
+	 * 需要时开始更新 models.dev，并发的调用共用同一个任务。有调用方传 `register` 为真（后台的 `updateModelsDev()`）时，
+	 * 拿到新数据后由任务自己全量注册。任务的回调先于等待它的调用方执行，所以这时显式入口随后还会再全量注册一次；
+	 * 只有管理页调用方（`register` 为假）时任务不注册，由它们自己注册。`always` 为真时不检查是否需要。
 	 */
 	private startModelsDev(register: boolean, always = false): ModelsDevTask | undefined {
 		if (this.modelsDevTask) {
@@ -264,7 +265,8 @@ export class Endpoints {
 
 	/**
 	 * 等 models.dev 更新完，返回一个认领函数：数据变了、并且还没有人为这次更新做过全量注册时返回真，只返回一次真。
-	 * 管理页并行刷新多个服务时，共享的下载完成后只有一个调用方全量注册。
+	 * 显式入口在真正全量注册时调用它，只做标记。任务已经因为后台调用方注册过时返回假，显式入口照样注册；
+	 * 纯管理页并行刷新时任务不注册，没有这次额外注册。
 	 */
 	private async waitModelsDev(always = false): Promise<() => boolean> {
 		const task = this.startModelsDev(false, always);
@@ -305,12 +307,12 @@ export class Endpoints {
 	}
 
 	/**
-	 * 管理页的刷新：先像修改操作一样重新读取配置、密钥和缓存（文件读不了时抛错，内存不变），再刷新目录，
+	 * 管理页的刷新：先像修改操作一样重新读取配置、密钥和缓存（配置或密钥文件读不了时抛错，内存不变），再刷新目录，
 	 * 等 models.dev 更新完（最多 60 秒），目录刷新成功时执行“每系最新”，立即生效。用户点刷新或打开页面是显式操作，
 	 * 可以在这里重新加载：pi 联网刷新时只写进磁盘的迁移，这时在本进程生效并显示在页面上。
 	 * 载入了快照就在最后全量注册一次（不管目录成功与否、有没有迁移），和其他修改操作一样：
 	 * 别的服务的配置也可能换了，它们的 `refreshModels` 会按内存里的新配置发布，注册必须跟内存一致。
-	 * 这次全量注册同时认领共享的 models.dev 下载，下载任务自己不再注册。
+	 * 进入注册时认领共享的 models.dev 下载。下载任务有后台调用方时它会先注册一次，这里还会再注册；纯管理页刷新时任务不注册。
 	 * 返回目录刷新失败的原因；models.dev 失败不算刷新失败。
 	 */
 	async refreshForPage(name: string): Promise<string | undefined> {
